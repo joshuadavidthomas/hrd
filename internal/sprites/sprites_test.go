@@ -16,6 +16,19 @@ func TestValidName(t *testing.T) {
 	}
 }
 
+func TestPaginationStopsWhenProviderOmitsContinuationToken(t *testing.T) {
+	t.Parallel()
+	if !terminalPage(true, "") {
+		t.Fatal("empty continuation token must stop pagination")
+	}
+	if terminalPage(true, "next") {
+		t.Fatal("non-empty continuation token must continue pagination")
+	}
+	if !terminalPage(false, "next") {
+		t.Fatal("has_more=false must stop pagination")
+	}
+}
+
 func TestLifecycleOnlyMapsProviderState(t *testing.T) {
 	t.Parallel()
 	for input, want := range map[string]State{"running": Running, "warm": Warm, "cold": Cold, "other": Unknown} {

@@ -93,11 +93,11 @@ func (c *Client) List(ctx context.Context) ([]Sprite, error) {
 			}
 			rows = append(rows, Sprite{Name: item.Name, State: lifecycle(item.Status)})
 		}
-		if !page.HasMore {
+		// The pinned SDK treats an empty token as the terminal page even when
+		// the provider leaves has_more true. Continuing would issue the first
+		// page again and duplicate inventory rows.
+		if terminalPage(page.HasMore, page.NextContinuationToken) {
 			return rows, nil
-		}
-		if page.NextContinuationToken == "" {
-			return nil, errors.New("Sprite inventory pagination ended without a continuation token")
 		}
 		continuation = page.NextContinuationToken
 	}
@@ -267,6 +267,8 @@ func (c *Client) probe(ctx context.Context, name string, credentials *sshagent.C
 	}
 	return fingerprint, nil
 }
+func terminalPage(hasMore bool, token string) bool { return !hasMore || token == "" }
+
 func lifecycle(value string) State {
 	switch value {
 	case "running":
