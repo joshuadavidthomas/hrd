@@ -26,7 +26,8 @@ import (
 )
 
 const (
-	nativeExecutable = "/home/sprite/.local/bin/herdr"
+	nativeExecutable          = "/home/sprite/.local/bin/herdr"
+	nativeTerminalEnvironment = "TERM=xterm-256color"
 	// Herdr publishes no checksum or signature manifest. HTTPS, redirects, the
 	// downloaded script, and the asset URLs it selects form the trust boundary.
 	nativeInstallURL   = "https://herdr.dev/install.sh"
@@ -406,6 +407,7 @@ func buildNativeExecURL(baseURL, name string, cols, rows int) (string, error) {
 	query.Set("path", nativeExecutable)
 	query.Set("tty", "true")
 	query.Set("stdin", "true")
+	query.Add("env", nativeTerminalEnvironment)
 	query.Set("rows", strconv.Itoa(rows))
 	query.Set("cols", strconv.Itoa(cols))
 	u.RawQuery = query.Encode()
