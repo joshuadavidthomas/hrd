@@ -8,6 +8,7 @@ import (
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
+	"github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
 func TestLocalDestinationsTranslateSessionsInSourceOrder(t *testing.T) {
@@ -212,6 +213,41 @@ func TestLocalOperationsPreparesAndObservesCancellation(t *testing.T) {
 	_, err = operations.Prepare(ctx, destinations[0])
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("LocalOperations.Prepare(canceled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSpriteDestinationsKeepObservedLifecycleAndSeparateIDs(t *testing.T) {
+	t.Parallel()
+	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "zeta", State: sprites.Cold}, {Name: "alpha", State: sprites.Running}})
+	if err != nil {
+		t.Fatalf("SpriteDestinations() error = %v", err)
+	}
+	if rows[0].Label != "alpha" || rows[0].Session != "default" {
+		t.Fatalf("rows = %#v", rows)
+	}
+	if status, ok := rows[0].Status.(catalog.SpriteStatus); !ok || status.Lifecycle != sprites.Running {
+		t.Fatalf("status = %#v", rows[0].Status)
+	}
+	local, err := catalog.LocalDestinations([]herdr.Session{{Name: "default", Default: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].ID == local[0].ID {
+		t.Fatal("Sprite and local IDs collide")
+	}
+}
+
+func TestPrepareSpriteUsesExactRemoteURI(t *testing.T) {
+	t.Parallel()
+	prepared, err := catalog.PrepareSprite("alpha", sprites.Prepared{Port: 41234, Fingerprint: "SHA256:test"})
+	if err != nil {
+		t.Fatalf("PrepareSprite() error = %v", err)
+	}
+	if got, want := prepared.HerdrArgs(), []string{"--remote", "ssh://sprite@127.0.0.1:41234"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 }
 

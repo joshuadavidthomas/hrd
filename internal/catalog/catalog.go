@@ -7,8 +7,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
+	"sort"
+	"sync"
 
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
+	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
 // DestinationID identifies both the endpoint and session of a destination.
@@ -24,6 +28,10 @@ type LocalEndpoint struct{}
 
 func (LocalEndpoint) endpoint() {}
 
+type SpriteEndpoint struct{ Name string }
+
+func (SpriteEndpoint) endpoint() {}
+
 // ObservedStatus is status obtained from a destination's source.
 type ObservedStatus interface {
 	observedStatus()
@@ -35,6 +43,10 @@ type LocalSessionStatus struct {
 }
 
 func (LocalSessionStatus) observedStatus() {}
+
+type SpriteStatus struct{ Lifecycle spriteapi.State }
+
+func (SpriteStatus) observedStatus() {}
 
 // Destination is an endpoint plus a Herdr session.
 type Destination struct {
@@ -48,7 +60,22 @@ type Destination struct {
 // PreparedAttach contains the arguments for the fixed herdr executable.
 // HerdrArgs returns a copy so a caller cannot mutate stored preparation state.
 type PreparedAttach struct {
-	herdrArgs []string
+	herdrArgs   []string
+	Fingerprint string
+	close       *attachCloseState
+}
+type attachCloseState struct {
+	once sync.Once
+	fn   func() error
+	err  error
+}
+
+func (p PreparedAttach) Close() error {
+	if p.close == nil {
+		return nil
+	}
+	p.close.once.Do(func() { p.close.err = p.close.fn() })
+	return p.close.err
 }
 
 // HerdrArgs returns a fresh copy of the arguments to pass to herdr.
@@ -149,8 +176,107 @@ func Prepare(destination Destination) (PreparedAttach, error) {
 }
 
 func localDestinationID(session string) DestinationID {
-	// The endpoint kind has its own field. A later Sprite ID can include its
-	// endpoint name in the middle field without sharing local identity.
-	encodedSession := base64.RawURLEncoding.EncodeToString([]byte(session))
-	return DestinationID("v1:local::" + encodedSession)
+	return DestinationID("v1:local::" + base64.RawURLEncoding.EncodeToString([]byte(session)))
+}
+func spriteDestinationID(name string) DestinationID {
+	return DestinationID("v1:sprite:" + base64.RawURLEncoding.EncodeToString([]byte(name)) + ":default")
+}
+
+func SpriteDestinations(records []spriteapi.Sprite) ([]Destination, error) {
+	rows := make([]Destination, 0, len(records))
+	seen := map[DestinationID]struct{}{}
+	for _, record := range records {
+		if record.Name == "" {
+			return nil, fmt.Errorf("%w: Sprite has an empty name", ErrInvalidDestination)
+		}
+		id := spriteDestinationID(record.Name)
+		if _, ok := seen[id]; ok {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicateDestination, id)
+		}
+		seen[id] = struct{}{}
+		rows = append(rows, Destination{ID: id, Endpoint: SpriteEndpoint{Name: record.Name}, Session: "default", Label: record.Name, Status: SpriteStatus{Lifecycle: record.State}})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Label < rows[j].Label })
+	return rows, nil
+}
+func PrepareSprite(name string, prepared spriteapi.Prepared) (PreparedAttach, error) {
+	if name == "" || prepared.Port <= 0 {
+		_ = prepared.Close()
+		return PreparedAttach{}, fmt.Errorf("%w: invalid Sprite preparation", ErrInvalidDestination)
+	}
+	target := (&url.URL{Scheme: "ssh", User: url.User("sprite"), Host: fmt.Sprintf("127.0.0.1:%d", prepared.Port)}).String()
+	return PreparedAttach{herdrArgs: []string{"--remote", target}, Fingerprint: prepared.Fingerprint, close: &attachCloseState{fn: prepared.Close}}, nil
+}
+
+type SpriteOperations struct {
+	local   *LocalOperations
+	sprites *spriteapi.Client
+}
+
+func NewSpriteOperations(local *herdr.Client, sprites *spriteapi.Client) *SpriteOperations {
+	return &SpriteOperations{local: NewLocalOperations(local), sprites: sprites}
+}
+
+type SourceResult struct {
+	Rows    []Destination
+	Skipped bool
+	Err     error
+}
+type Inventory struct {
+	Local   SourceResult
+	Sprites SourceResult
+}
+
+func (o *SpriteOperations) Inventory(ctx context.Context) Inventory {
+	var result Inventory
+	var wait sync.WaitGroup
+	wait.Add(1)
+	go func() { defer wait.Done(); result.Local.Rows, result.Local.Err = o.local.List(ctx) }()
+	if o.sprites == nil {
+		result.Sprites.Skipped = true
+	} else {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			records, err := o.sprites.List(ctx)
+			if err != nil {
+				result.Sprites.Err = err
+				return
+			}
+			result.Sprites.Rows, result.Sprites.Err = SpriteDestinations(records)
+		}()
+	}
+	wait.Wait()
+	return result
+}
+func (o *SpriteOperations) List(ctx context.Context) ([]Destination, error) {
+	inventory := o.Inventory(ctx)
+	rows := append(append([]Destination(nil), inventory.Local.Rows...), inventory.Sprites.Rows...)
+	if inventory.Local.Err != nil && inventory.Sprites.Err != nil {
+		return nil, fmt.Errorf("local: %w; Sprites: %v", inventory.Local.Err, inventory.Sprites.Err)
+	}
+	return rows, nil
+}
+func (o *SpriteOperations) Prepare(ctx context.Context, destination Destination) (PreparedAttach, error) {
+	switch endpoint := destination.Endpoint.(type) {
+	case LocalEndpoint:
+		return o.local.Prepare(ctx, destination)
+	case SpriteEndpoint:
+		if destination.Session != "default" || destination.ID != spriteDestinationID(endpoint.Name) {
+			return PreparedAttach{}, fmt.Errorf("%w: invalid Sprite destination", ErrInvalidDestination)
+		}
+		return o.PrepareSprite(ctx, endpoint.Name)
+	default:
+		return PreparedAttach{}, fmt.Errorf("%w: unsupported endpoint", ErrInvalidDestination)
+	}
+}
+func (o *SpriteOperations) Create(ctx context.Context, name string) spriteapi.CreateResult {
+	return o.sprites.Create(ctx, name)
+}
+func (o *SpriteOperations) PrepareSprite(ctx context.Context, name string) (PreparedAttach, error) {
+	prepared, err := o.sprites.Prepare(ctx, name)
+	if err != nil {
+		return PreparedAttach{}, err
+	}
+	return PrepareSprite(name, prepared)
 }
