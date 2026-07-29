@@ -3,6 +3,7 @@ package catalog_test
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"testing"
 
@@ -62,18 +63,20 @@ func TestPrepareUsesExactLocalArguments(t *testing.T) {
 		t.Fatalf("LocalDestinations() error = %v", err)
 	}
 
-	defaultAttach, err := catalog.Prepare(destinations[0])
+	defaultResult, err := catalog.Prepare(destinations[0])
 	if err != nil {
 		t.Fatalf("Prepare(default) error = %v", err)
 	}
+	defaultAttach := requireProcessAttach(t, defaultResult)
 	if got := defaultAttach.HerdrArgs(); len(got) != 0 {
 		t.Fatalf("default args = %#v, want no args", got)
 	}
 
-	namedAttach, err := catalog.Prepare(destinations[1])
+	namedResult, err := catalog.Prepare(destinations[1])
 	if err != nil {
 		t.Fatalf("Prepare(named) error = %v", err)
 	}
+	namedAttach := requireProcessAttach(t, namedResult)
 	want := []string{"--session", "work tree"}
 	if got := namedAttach.HerdrArgs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("named args = %#v, want %#v", got, want)
@@ -87,10 +90,11 @@ func TestPreparedAttachReturnsArgumentCopies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LocalDestinations() error = %v", err)
 	}
-	prepared, err := catalog.Prepare(destinations[0])
+	result, err := catalog.Prepare(destinations[0])
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
+	prepared := requireProcessAttach(t, result)
 
 	first := prepared.HerdrArgs()
 	first[0] = "mutated"
@@ -139,10 +143,11 @@ func TestStoppedSessionRemainsSelectable(t *testing.T) {
 	if status.Running {
 		t.Fatal("stopped destination was marked running")
 	}
-	prepared, err := catalog.Prepare(destinations[0])
+	result, err := catalog.Prepare(destinations[0])
 	if err != nil {
 		t.Fatalf("Prepare(stopped) error = %v", err)
 	}
+	prepared := requireProcessAttach(t, result)
 	if want := []string{"--session", "sleeping"}; !reflect.DeepEqual(prepared.HerdrArgs(), want) {
 		t.Fatalf("stopped args = %#v, want %#v", prepared.HerdrArgs(), want)
 	}
@@ -200,10 +205,11 @@ func TestLocalOperationsPreparesAndObservesCancellation(t *testing.T) {
 		t.Fatalf("LocalDestinations() error = %v", err)
 	}
 	operations := catalog.NewLocalOperations(herdr.New())
-	prepared, err := operations.Prepare(context.Background(), destinations[0])
+	result, err := operations.Prepare(context.Background(), destinations[0])
 	if err != nil {
 		t.Fatalf("LocalOperations.Prepare() error = %v", err)
 	}
+	prepared := requireProcessAttach(t, result)
 	if want := []string{"--session", "work"}; !reflect.DeepEqual(prepared.HerdrArgs(), want) {
 		t.Fatalf("LocalOperations.Prepare() args = %#v, want %#v", prepared.HerdrArgs(), want)
 	}
@@ -237,21 +243,101 @@ func TestSpriteDestinationsKeepObservedLifecycleAndSeparateIDs(t *testing.T) {
 	}
 }
 
-func TestPrepareSpriteUsesExactRemoteURI(t *testing.T) {
+func TestPrepareSpriteSSHUsesExactRemoteURI(t *testing.T) {
 	t.Parallel()
-	prepared, err := catalog.PrepareSprite("alpha", sprites.Prepared{Port: 41234, Fingerprint: "SHA256:test", SSHAuthSocket: "/tmp/hrd-agent.sock"})
+	result, err := catalog.PrepareSpriteSSH("alpha", sprites.Prepared{Port: 41234, Fingerprint: "SHA256:test", SSHAuthSocket: "/tmp/hrd-agent.sock"})
 	if err != nil {
-		t.Fatalf("PrepareSprite() error = %v", err)
+		t.Fatalf("PrepareSpriteSSH() error = %v", err)
 	}
+	prepared := requireProcessAttach(t, result)
 	if got, want := prepared.HerdrArgs(), []string{"--remote", "ssh://sprite@127.0.0.1:41234"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 	if prepared.SSHAuthSocket() != "/tmp/hrd-agent.sock" {
 		t.Fatalf("SSH agent socket = %q", prepared.SSHAuthSocket())
 	}
-	if err := prepared.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
+	if prepared.Fingerprint != "SHA256:test" {
+		t.Fatalf("fingerprint = %q, want SHA256:test", prepared.Fingerprint)
 	}
+	for call := 1; call <= 2; call++ {
+		if err := prepared.Close(); err != nil {
+			t.Fatalf("Close() call %d error = %v", call, err)
+		}
+	}
+}
+
+type fakeTerminalCommand struct{}
+
+func (*fakeTerminalCommand) Run() error          { return nil }
+func (*fakeTerminalCommand) SetStdin(io.Reader)  {}
+func (*fakeTerminalCommand) SetStdout(io.Writer) {}
+func (*fakeTerminalCommand) SetStderr(io.Writer) {}
+
+func TestPreparedVariantsRemainDistinct(t *testing.T) {
+	t.Parallel()
+
+	command := &fakeTerminalCommand{}
+	var nativeResult catalog.PreparedAttach = catalog.PreparedNativeAttach{Command: command}
+	native, ok := nativeResult.(catalog.PreparedNativeAttach)
+	if !ok {
+		t.Fatalf("native result = %T, want PreparedNativeAttach", nativeResult)
+	}
+	if native.Command != command {
+		t.Fatal("native preparation changed command identity")
+	}
+	if err := native.Close(); err != nil {
+		t.Fatalf("native Close() error = %v", err)
+	}
+	if _, ok := nativeResult.(catalog.PreparedProcessAttach); ok {
+		t.Fatal("native preparation is also a process preparation")
+	}
+
+	processResult, err := catalog.PrepareSpriteSSH("alpha", sprites.Prepared{Port: 22})
+	if err != nil {
+		t.Fatalf("PrepareSpriteSSH() error = %v", err)
+	}
+	if _, ok := processResult.(catalog.PreparedProcessAttach); !ok {
+		t.Fatalf("SSH result = %T, want PreparedProcessAttach", processResult)
+	}
+	if _, ok := processResult.(catalog.PreparedNativeAttach); ok {
+		t.Fatal("process preparation is also a native preparation")
+	}
+}
+
+func TestSpritePreparationRejectsInvalidVariantInputs(t *testing.T) {
+	t.Parallel()
+
+	if _, err := catalog.PrepareSpriteSSH("Bad Name", sprites.Prepared{Port: 22}); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("PrepareSpriteSSH(invalid name) error = %v, want ErrInvalidDestination", err)
+	}
+	if _, err := catalog.PrepareSpriteSSH("alpha", sprites.Prepared{}); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("PrepareSpriteSSH(invalid port) error = %v, want ErrInvalidDestination", err)
+	}
+}
+
+func TestSpritePreparationRequiresExplicitValidTransport(t *testing.T) {
+	t.Parallel()
+
+	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "alpha", State: sprites.Running}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := catalog.NewSpriteOperations(herdr.New(), nil)
+	if _, err := operations.Prepare(context.Background(), rows[0]); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("Prepare(Sprite) error = %v, want ErrInvalidDestination", err)
+	}
+	if _, err := operations.PrepareSprite(context.Background(), "alpha", catalog.SpriteTransport(99)); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("PrepareSprite(invalid transport) error = %v, want ErrInvalidDestination", err)
+	}
+}
+
+func requireProcessAttach(t *testing.T, result catalog.PreparedAttach) catalog.PreparedProcessAttach {
+	t.Helper()
+	prepared, ok := result.(catalog.PreparedProcessAttach)
+	if !ok {
+		t.Fatalf("prepared result = %T, want PreparedProcessAttach", result)
+	}
+	return prepared
 }
 
 func TestNewLocalOperationsRejectsNilClient(t *testing.T) {

@@ -35,11 +35,17 @@ type inventoryOperations interface {
 }
 type spriteOperations interface {
 	Create(context.Context, string) spriteapi.CreateResult
-	PrepareSprite(context.Context, string) (catalog.PreparedAttach, error)
+	PrepareSprite(context.Context, string, catalog.SpriteTransport) (catalog.PreparedAttach, error)
 }
 type sshKeyOperations interface {
 	SSHAddCommand(context.Context) (*exec.Cmd, error)
 	SelectSSHKey(string) error
+}
+
+type sourceSnapshot struct {
+	rows    []catalog.Destination
+	loaded  bool
+	current bool
 }
 
 type phase uint8
@@ -53,6 +59,7 @@ const (
 	phaseInitialLoadFailed
 	phaseNamingSprite
 	phaseCreatingSprite
+	phaseChoosingSpriteTransport
 	phaseConfirmingHostKey
 	phaseStartingSSHAgent
 	phaseAddingSSHKey
@@ -67,10 +74,9 @@ type listDone struct {
 }
 
 type prepareDone struct {
-	opID        uint64
-	destination catalog.Destination
-	prepared    catalog.PreparedAttach
-	err         error
+	opID     uint64
+	prepared catalog.PreparedAttach
+	err      error
 }
 
 type attachDone struct {
@@ -91,22 +97,34 @@ type sshAddDone struct {
 	err  error
 }
 
-type pendingKind uint8
+type spriteAttachOrigin uint8
 
 const (
-	pendingNone pendingKind = iota
-	pendingCreate
-	pendingDestination
-	pendingCreatedSprite
+	spriteOriginExisting spriteAttachOrigin = iota + 1
+	spriteOriginConfirmedCreate
 )
 
-type pendingOperation struct {
-	kind        pendingKind
-	name        string
+type spriteAttachTarget struct {
+	origin    spriteAttachOrigin
+	name      string
+	transport catalog.SpriteTransport
+}
+
+type prepareKind uint8
+
+const (
+	prepareLocal prepareKind = iota + 1
+	prepareSprite
+)
+
+type prepareOperation struct {
+	kind        prepareKind
 	destination catalog.Destination
+	sprite      spriteAttachTarget
 }
 
 type execProcessFunc func(*exec.Cmd, tea.ExecCallback) tea.Cmd
+type execCommandFunc func(tea.ExecCommand, tea.ExecCallback) tea.Cmd
 
 type keyMap struct {
 	attach  key.Binding
@@ -137,6 +155,7 @@ type Model struct {
 	root        context.Context
 	operations  Operations
 	execProcess execProcessFunc
+	execCommand execCommandFunc
 	keys        keyMap
 
 	phase         phase
@@ -146,6 +165,9 @@ type Model struct {
 	initialCmd    tea.Cmd
 
 	destinations         []catalog.Destination
+	inventoryAware       bool
+	localSnapshot        sourceSnapshot
+	spriteSnapshot       sourceSnapshot
 	selectedID           catalog.DestinationID
 	cursor               int
 	attachEnabled        bool
@@ -160,8 +182,8 @@ type Model struct {
 	createBlock          string
 	prepared             catalog.PreparedAttach
 	spriteCreateEnabled  bool
-	preparingSprite      bool
-	pending              pendingOperation
+	transportTarget      spriteAttachTarget
+	activePrepare        prepareOperation
 	sshRecoveryAttempted bool
 	sshKeySource         string
 	sshKeyChoices        []catalog.SSHIdentity
@@ -180,15 +202,18 @@ func New(root context.Context, operations Operations) Model {
 		panic("ui: nil operations")
 	}
 
+	_, inventoryAware := operations.(inventoryOperations)
 	m := Model{
-		root:          root,
-		operations:    operations,
-		execProcess:   tea.ExecProcess,
-		keys:          newKeyMap(),
-		phase:         phaseLoading,
-		attachEnabled: false,
-		width:         defaultWidth,
-		height:        defaultHeight,
+		root:           root,
+		operations:     operations,
+		execProcess:    tea.ExecProcess,
+		execCommand:    tea.Exec,
+		keys:           newKeyMap(),
+		phase:          phaseLoading,
+		inventoryAware: inventoryAware,
+		attachEnabled:  false,
+		width:          defaultWidth,
+		height:         defaultHeight,
 	}
 	m.initialCmd = m.beginList()
 	return m
@@ -200,6 +225,9 @@ func (m Model) Init() tea.Cmd { return m.initialCmd }
 // Update applies one Bubble Tea message.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitting {
+		if completion, ok := msg.(prepareDone); ok {
+			closePrepared(completion.prepared)
+		}
 		return m, nil
 	}
 	switch msg := msg.(type) {
@@ -227,27 +255,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.phase == phaseAttaching || m.phase == phaseAddingSSHKey {
-		return m, nil
-	}
 	textEditing := m.editingFilter || m.phase == phaseNamingSprite
 	if key.Matches(msg, m.keys.force) || (key.Matches(msg, m.keys.quit) && !textEditing) {
 		m.cancelOperation()
-		_ = m.prepared.Close()
+		closePrepared(m.prepared)
+		m.prepared = nil
 		m.quitting = true
 		return m, tea.Quit
+	}
+	if m.phase == phaseAttaching || m.phase == phaseAddingSSHKey {
+		return m, nil
 	}
 
 	if m.phase == phaseNamingSprite {
 		return m.updateName(msg)
+	}
+	if m.phase == phaseChoosingSpriteTransport {
+		return m.updateSpriteTransport(msg)
 	}
 	if m.phase == phaseConfirmingHostKey {
 		if msg.String() == "enter" {
 			return m, m.beginAttach()
 		}
 		if msg.String() == "esc" {
-			_ = m.prepared.Close()
-			m.prepared = catalog.PreparedAttach{}
+			closePrepared(m.prepared)
+			m.prepared = nil
 			m.phase = phaseRefreshing
 			return m, m.beginList()
 		}
@@ -272,7 +304,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, m.keys.attach):
-		if !m.attachEnabled {
+		if !m.selectedAttachEnabled() {
 			return m, nil
 		}
 		destination, ok := m.selectedDestination()
@@ -283,6 +315,13 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.loadNotice = ""
 		m.attachNotice = ""
 		m.selectedID = destination.ID
+		if endpoint, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok {
+			m.beginTransportChoice(spriteAttachTarget{
+				origin: spriteOriginExisting,
+				name:   endpoint.Name,
+			})
+			return m, nil
+		}
 		return m, m.beginPrepare(destination)
 	case msg.String() == "n":
 		if _, ok := m.operations.(spriteOperations); ok && m.spriteCreateEnabled && m.createBlock == "" {
@@ -339,6 +378,38 @@ func (m Model) updateName(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) beginTransportChoice(target spriteAttachTarget) {
+	target.transport = catalog.NativePreview
+	m.transportTarget = target
+	m.phase = phaseChoosingSpriteTransport
+	m.attachEnabled = false
+	m.attachNotice = ""
+}
+
+func (m Model) updateSpriteTransport(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.up), key.Matches(msg, m.keys.down):
+		if m.transportTarget.transport == catalog.NativePreview {
+			m.transportTarget.transport = catalog.SSHFallback
+		} else {
+			m.transportTarget.transport = catalog.NativePreview
+		}
+		return m, nil
+	case msg.String() == "enter":
+		return m, m.beginPrepareSprite(m.transportTarget)
+	case msg.String() == "esc":
+		if m.transportTarget.origin == spriteOriginConfirmedCreate {
+			m.phase = phaseRefreshing
+			return m, m.beginList()
+		}
+		m.phase = phaseReady
+		m.attachEnabled = m.hasAttachableDestinations()
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
 func (m Model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
@@ -368,6 +439,10 @@ func (m Model) updateListDone(msg listDone) (tea.Model, tea.Cmd) {
 	wasInitial := m.phase == phaseLoading
 	m.cancelOperation()
 
+	if msg.inventory != nil {
+		return m.updateInventoryDone(*msg.inventory, wasInitial), nil
+	}
+
 	if msg.err != nil {
 		if wasInitial {
 			m.phase = phaseInitialLoadFailed
@@ -387,46 +462,101 @@ func (m Model) updateListDone(msg listDone) (tea.Model, tea.Cmd) {
 	m.attachEnabled = len(msg.destinations) > 0
 	m.spriteCreateEnabled = false
 	m.loadNotice = ""
-	if msg.inventory != nil {
-		m.spriteCreateEnabled = !msg.inventory.Sprites.Skipped && msg.inventory.Sprites.Err == nil
-		if msg.inventory.Local.Err != nil {
-			m.loadNotice = "Local refresh failed: " + msg.inventory.Local.Err.Error()
-		}
-		if msg.inventory.Sprites.Err != nil {
-			m.loadNotice = "Sprite refresh failed: " + msg.inventory.Sprites.Err.Error()
-		}
-	}
 	m.destinations = append([]catalog.Destination(nil), msg.destinations...)
-	for _, destination := range m.destinations {
-		if endpoint, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok && endpoint.Name == m.createBlock {
-			m.createBlock = ""
-		}
-	}
+	m.reconcileCreateBlock()
 	m.cursor = 0
 	m.filter = ""
 	m.editingFilter = false
 	return m, nil
 }
 
+func (m Model) updateInventoryDone(inventory catalog.Inventory, wasInitial bool) Model {
+	selected, hadSelection := m.selectedDestination()
+	m.localSnapshot = refreshedSnapshot(m.localSnapshot, inventory.Local)
+	m.spriteSnapshot = refreshedSnapshot(m.spriteSnapshot, inventory.Sprites)
+	m.destinations = append(append([]catalog.Destination(nil), m.localSnapshot.rows...), m.spriteSnapshot.rows...)
+	m.spriteCreateEnabled = m.spriteSnapshot.loaded && m.spriteSnapshot.current
+	m.attachEnabled = m.hasAttachableDestinations()
+	m.loadNotice = inventoryNotice(inventory, wasInitial)
+	m.editingFilter = false
+	m.reconcileCreateBlock()
+
+	if wasInitial && !m.localSnapshot.loaded && !m.spriteSnapshot.loaded {
+		m.phase = phaseInitialLoadFailed
+		m.destinations = nil
+		m.attachEnabled = false
+		m.spriteCreateEnabled = false
+		if m.loadNotice == "" {
+			m.loadNotice = "No destination source loaded."
+		}
+		m.cursor = 0
+		return m
+	}
+
+	m.phase = phaseReady
+	if hadSelection {
+		m.restoreCursor(selected.ID)
+	} else {
+		m.cursor = min(m.cursor, max(0, len(m.visibleDestinations())-1))
+	}
+	return m
+}
+
+func refreshedSnapshot(previous sourceSnapshot, result catalog.SourceResult) sourceSnapshot {
+	if result.Skipped {
+		return sourceSnapshot{}
+	}
+	if result.Err != nil {
+		previous.current = false
+		return previous
+	}
+	return sourceSnapshot{
+		rows:    append([]catalog.Destination(nil), result.Rows...),
+		loaded:  true,
+		current: true,
+	}
+}
+
+func inventoryNotice(inventory catalog.Inventory, initial bool) string {
+	action := "refresh"
+	if initial {
+		action = "load"
+	}
+	var notices []string
+	if inventory.Local.Err != nil {
+		notices = append(notices, "Local "+action+" failed: "+inventory.Local.Err.Error())
+	}
+	if inventory.Sprites.Err != nil {
+		notices = append(notices, "Sprite "+action+" failed: "+inventory.Sprites.Err.Error())
+	}
+	return strings.Join(notices, "; ")
+}
+
 func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
-	if m.phase != phasePreparing || msg.opID != m.operationID || msg.destination.ID != m.selectedID {
-		_ = msg.prepared.Close()
+	if m.phase != phasePreparing || msg.opID != m.operationID {
+		closePrepared(msg.prepared)
 		return m, nil
 	}
 	m.cancelOperation()
 	if msg.err != nil {
-		_ = msg.prepared.Close()
-		if source, choices, ok := catalog.SSHKeyChoices(msg.err); ok {
-			return m.beginSSHKeySelection(source, choices)
-		}
-		if catalog.NeedsSSHKey(msg.err) && !m.sshRecoveryAttempted {
-			return m, m.beginSSHKeyRecovery()
+		closePrepared(msg.prepared)
+		if m.activePrepare.kind == prepareSprite && m.activePrepare.sprite.transport == catalog.SSHFallback {
+			if source, choices, ok := catalog.SSHKeyChoices(msg.err); ok {
+				return m.beginSSHKeySelection(source, choices)
+			}
+			if catalog.NeedsSSHKey(msg.err) && !m.sshRecoveryAttempted {
+				return m, m.beginSSHKeyRecovery()
+			}
+			if catalog.NeedsSSHKey(msg.err) {
+				m.attachNotice = "ssh-add finished without loading a key. Add a key, then try again."
+			} else {
+				m.attachNotice = prepareFailureNotice(msg.err)
+			}
+			m.phase = phaseRefreshing
+			return m, m.beginList()
 		}
 		m.attachNotice = prepareFailureNotice(msg.err)
-		if catalog.NeedsSSHKey(msg.err) {
-			m.attachNotice = "ssh-add finished without loading a key. Add a key, then try again."
-		}
-		if m.preparingSprite {
+		if m.activePrepare.kind == prepareSprite {
 			m.phase = phaseRefreshing
 			return m, m.beginList()
 		}
@@ -434,20 +564,54 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 		m.attachEnabled = true
 		return m, nil
 	}
-	m.prepared = msg.prepared
-	if msg.prepared.Fingerprint != "" {
-		m.phase = phaseConfirmingHostKey
+	if msg.prepared == nil {
+		m.attachNotice = "Couldn’t prepare destination: no attachment was returned."
+		if m.activePrepare.kind == prepareSprite {
+			m.phase = phaseRefreshing
+			return m, m.beginList()
+		}
+		m.phase = phaseReady
+		m.attachEnabled = true
 		return m, nil
 	}
-	return m, m.beginAttach()
+
+	m.prepared = msg.prepared
+	switch prepared := msg.prepared.(type) {
+	case catalog.PreparedProcessAttach:
+		if prepared.Fingerprint != "" {
+			m.phase = phaseConfirmingHostKey
+			return m, nil
+		}
+		return m, m.beginProcessAttach(prepared)
+	case catalog.PreparedNativeAttach:
+		if prepared.Command == nil {
+			closePrepared(m.prepared)
+			m.prepared = nil
+			m.attachNotice = "Couldn’t prepare destination: no native command was returned."
+			m.phase = phaseRefreshing
+			return m, m.beginList()
+		}
+		return m, m.beginNativeAttach(prepared)
+	default:
+		closePrepared(m.prepared)
+		m.prepared = nil
+		m.attachNotice = "Couldn’t prepare destination: unknown attachment type."
+		if m.activePrepare.kind == prepareSprite {
+			m.phase = phaseRefreshing
+			return m, m.beginList()
+		}
+		m.phase = phaseReady
+		m.attachEnabled = true
+		return m, nil
+	}
 }
 
 func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
 	if m.phase != phaseAttaching || msg.opID != m.operationID {
 		return m, nil
 	}
-	_ = m.prepared.Close()
-	m.prepared = catalog.PreparedAttach{}
+	closePrepared(m.prepared)
+	m.prepared = nil
 	if msg.err != nil {
 		m.attachNotice = "Attach failed: " + msg.err.Error()
 	} else {
@@ -464,21 +628,24 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 	}
 	m.cancelOperation()
 	if msg.result.Confirmed {
-		m.selectedID = catalog.DestinationID("created:" + msg.result.Name)
-		return m, m.beginPrepareSprite(msg.result.Name)
+		if err := spriteapi.ValidName(msg.result.Name); err != nil {
+			m.createBlock = msg.result.Name
+			m.attachNotice = "Creation was confirmed with an invalid Sprite name. Refresh to reconcile it."
+			m.phase = phaseRefreshing
+			return m, m.beginList()
+		}
+		m.beginTransportChoice(spriteAttachTarget{
+			origin: spriteOriginConfirmedCreate,
+			name:   msg.result.Name,
+		})
+		return m, nil
 	}
 	if msg.result.Rejected {
-		if source, choices, ok := catalog.SSHKeyChoices(msg.result.Err); ok {
-			return m.beginSSHKeySelection(source, choices)
-		}
-		if catalog.NeedsSSHKey(msg.result.Err) && !m.sshRecoveryAttempted {
-			return m, m.beginSSHKeyRecovery()
-		}
 		m.phase = phaseNamingSprite
-		if catalog.NeedsSSHKey(msg.result.Err) {
-			m.attachNotice = "ssh-add finished without loading a key. Add a key, then try again."
+		if msg.result.Err == nil {
+			m.attachNotice = "Create failed."
 		} else {
-			m.attachNotice = "Create failed: " + msg.result.Err.Error()
+			m.attachNotice = "Create failed: " + printable(msg.result.Err.Error())
 		}
 		return m, nil
 	}
@@ -532,17 +699,7 @@ func (m Model) updateSSHKeyChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) cancelSSHKeySelection() (tea.Model, tea.Cmd) {
 	m.sshKeyChoices = nil
 	m.sshKeySource = ""
-	switch m.pending.kind {
-	case pendingCreate:
-		m.phase = phaseNamingSprite
-		return m, nil
-	case pendingCreatedSprite:
-		m.phase = phaseRefreshing
-		return m, m.beginList()
-	default:
-		m.phase = phaseReady
-		return m, nil
-	}
+	return m.afterSpriteAttachCanceled()
 }
 
 func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
@@ -590,28 +747,29 @@ func (m *Model) beginSSHKeyRecovery() tea.Cmd {
 }
 
 func (m Model) retryPending() (tea.Model, tea.Cmd) {
-	switch m.pending.kind {
-	case pendingCreate:
-		return m, m.startCreate(m.pending.name)
-	case pendingDestination:
-		return m, m.startPrepare(m.pending.destination)
-	case pendingCreatedSprite:
-		return m, m.startPrepareSprite(m.pending.name)
-	default:
+	target := m.activePrepare.sprite
+	if target.transport != catalog.SSHFallback || target.name == "" {
 		m.phase = phaseReady
-		m.attachNotice = "SSH key setup completed, but there is no pending Sprite operation."
+		m.attachNotice = "SSH key setup completed, but there is no pending Sprite fallback."
 		return m, nil
 	}
+	return m, m.startPrepareSprite(target)
 }
 
 func (m Model) sshKeySetupFailed(err error) (tea.Model, tea.Cmd) {
 	m.attachNotice = "ssh-add did not load a key: " + printable(err.Error())
-	if m.pending.kind == pendingCreate {
-		m.phase = phaseNamingSprite
-		return m, nil
-	}
 	m.phase = phaseRefreshing
 	return m, m.beginList()
+}
+
+func (m Model) afterSpriteAttachCanceled() (tea.Model, tea.Cmd) {
+	if m.activePrepare.sprite.origin == spriteOriginConfirmedCreate {
+		m.phase = phaseRefreshing
+		return m, m.beginList()
+	}
+	m.phase = phaseReady
+	m.attachEnabled = m.hasAttachableDestinations()
+	return m, nil
 }
 
 func (m *Model) beginList() tea.Cmd {
@@ -623,12 +781,7 @@ func (m *Model) beginList() tea.Cmd {
 	return func() tea.Msg {
 		if sourceOperations, ok := operations.(inventoryOperations); ok {
 			inventory := sourceOperations.Inventory(ctx)
-			rows := append(append([]catalog.Destination(nil), inventory.Local.Rows...), inventory.Sprites.Rows...)
-			var err error
-			if inventory.Local.Err != nil && inventory.Sprites.Err != nil {
-				err = fmt.Errorf("local: %w; Sprites: %v", inventory.Local.Err, inventory.Sprites.Err)
-			}
-			return listDone{opID: opID, destinations: rows, inventory: &inventory, err: err}
+			return listDone{opID: opID, inventory: &inventory}
 		}
 		destinations, err := operations.List(ctx)
 		return listDone{opID: opID, destinations: append([]catalog.Destination(nil), destinations...), err: err}
@@ -636,8 +789,6 @@ func (m *Model) beginList() tea.Cmd {
 }
 
 func (m *Model) beginCreate(name string) tea.Cmd {
-	m.pending = pendingOperation{kind: pendingCreate, name: name}
-	m.sshRecoveryAttempted = false
 	return m.startCreate(name)
 }
 
@@ -653,12 +804,12 @@ func (m *Model) startCreate(name string) tea.Cmd {
 	opID := m.operationID
 	return func() tea.Msg { return createDone{opID: opID, result: operations.Create(ctx, name)} }
 }
-func (m *Model) beginPrepareSprite(name string) tea.Cmd {
-	m.pending = pendingOperation{kind: pendingCreatedSprite, name: name}
-	return m.startPrepareSprite(name)
+func (m *Model) beginPrepareSprite(target spriteAttachTarget) tea.Cmd {
+	m.sshRecoveryAttempted = false
+	return m.startPrepareSprite(target)
 }
 
-func (m *Model) startPrepareSprite(name string) tea.Cmd {
+func (m *Model) startPrepareSprite(target spriteAttachTarget) tea.Cmd {
 	operations, ok := m.operations.(spriteOperations)
 	if !ok {
 		return nil
@@ -667,18 +818,26 @@ func (m *Model) startPrepareSprite(name string) tea.Cmd {
 	ctx, cancel := context.WithCancel(m.root)
 	m.operationStop = cancel
 	m.phase = phasePreparing
-	m.preparingSprite = true
+	m.activePrepare = prepareOperation{kind: prepareSprite, sprite: target}
 	opID := m.operationID
-	destination := catalog.Destination{ID: catalog.DestinationID("created:" + name), Label: name}
 	return func() tea.Msg {
-		prepared, err := operations.PrepareSprite(ctx, name)
-		return prepareDone{opID: opID, destination: destination, prepared: prepared, err: err}
+		prepared, err := operations.PrepareSprite(ctx, target.name, target.transport)
+		return prepareDone{opID: opID, prepared: prepared, err: err}
 	}
 }
+
 func (m *Model) beginAttach() tea.Cmd {
-	args := m.prepared.HerdrArgs()
+	prepared, ok := m.prepared.(catalog.PreparedProcessAttach)
+	if !ok {
+		return nil
+	}
+	return m.beginProcessAttach(prepared)
+}
+
+func (m *Model) beginProcessAttach(prepared catalog.PreparedProcessAttach) tea.Cmd {
+	args := prepared.HerdrArgs()
 	command := exec.CommandContext(m.root, "herdr", append([]string(nil), args...)...)
-	if socket := m.prepared.SSHAuthSocket(); socket != "" {
+	if socket := prepared.SSHAuthSocket(); socket != "" {
 		environment := withoutEnvironment(os.Environ(), "SPRITE_TOKEN")
 		command.Env = withEnvironment(environment, "SSH_AUTH_SOCK", socket)
 	}
@@ -687,8 +846,13 @@ func (m *Model) beginAttach() tea.Cmd {
 	return m.execProcess(command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
 
+func (m *Model) beginNativeAttach(prepared catalog.PreparedNativeAttach) tea.Cmd {
+	m.phase = phaseAttaching
+	opID := m.operationID
+	return m.execCommand(prepared.Command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
+}
+
 func (m *Model) beginPrepare(destination catalog.Destination) tea.Cmd {
-	m.pending = pendingOperation{kind: pendingDestination, destination: destination}
 	m.sshRecoveryAttempted = false
 	return m.startPrepare(destination)
 }
@@ -698,16 +862,15 @@ func (m *Model) startPrepare(destination catalog.Destination) tea.Cmd {
 	ctx, cancel := context.WithCancel(m.root)
 	m.operationStop = cancel
 	m.phase = phasePreparing
-	_, m.preparingSprite = destination.Endpoint.(catalog.SpriteEndpoint)
+	m.activePrepare = prepareOperation{kind: prepareLocal, destination: destination}
 	opID := m.operationID
 	operations := m.operations
 	return func() tea.Msg {
 		prepared, err := operations.Prepare(ctx, destination)
 		return prepareDone{
-			opID:        opID,
-			destination: destination,
-			prepared:    prepared,
-			err:         err,
+			opID:     opID,
+			prepared: prepared,
+			err:      err,
 		}
 	}
 }
@@ -750,6 +913,8 @@ func (m Model) View() tea.View {
 		content = m.nameView()
 	case phaseCreatingSprite:
 		content = m.simpleView("Creating "+m.spriteName+"…\nThis can take a moment.", "q quit")
+	case phaseChoosingSpriteTransport:
+		content = m.spriteTransportView()
 	case phaseConfirmingHostKey:
 		content = m.hostKeyView()
 	case phaseStartingSSHAgent:
@@ -807,7 +972,9 @@ func (m Model) snapshotView(status, footer string) string {
 			parts = append(parts, "", "No destinations match “"+printable(m.filter)+"”.")
 		}
 	} else {
-		rows, selectedLine := destinationRows(visible, m.cursor, m.width)
+		rows, selectedLine := destinationRows(visible, m.cursor, m.width, func(destination catalog.Destination) bool {
+			return m.inventoryAware && !m.destinationCurrent(destination)
+		})
 		available := max(1, m.height-len(parts)-footerLineCount(footer)-2)
 		start := max(0, selectedLine-available+1)
 		end := min(len(rows), start+available)
@@ -839,10 +1006,15 @@ func (m Model) readyHelp() string {
 	if m.editingFilter {
 		return keyHint("enter", "apply") + "   " + keyHint("esc", "cancel") + "   " + keyHint("ctrl+c", "quit")
 	}
+	selectedAttachEnabled := m.selectedAttachEnabled()
 	if m.showHelp {
 		attach := keyHint("enter", "attach")
-		if !m.attachEnabled {
-			attach = mutedStyle.Render("attach unavailable until refresh succeeds")
+		if !selectedAttachEnabled {
+			unavailable := "attach unavailable until refresh succeeds"
+			if m.selectedDestinationStale() {
+				unavailable = "stale destination unavailable until its source refreshes"
+			}
+			attach = mutedStyle.Render(unavailable)
 		}
 		secondLine := []string{keyHint("?", "close help"), keyHint("q", "quit")}
 		if _, ok := m.operations.(spriteOperations); ok && m.spriteCreateEnabled && m.createBlock == "" {
@@ -853,7 +1025,10 @@ func (m Model) readyHelp() string {
 			strings.Join(secondLine, "   "),
 		}, "\n")
 	}
-	if !m.attachEnabled {
+	if !selectedAttachEnabled {
+		if m.inventoryAware && m.attachEnabled {
+			return keyHint("↑↓", "move") + "   " + keyHint("r", "refresh") + "   " + keyHint("/", "search") + "   " + keyHint("?", "help") + "   " + keyHint("q", "quit")
+		}
 		return keyHint("r", "retry") + "   " + keyHint("/", "search") + "   " + keyHint("?", "help") + "   " + keyHint("q", "quit")
 	}
 	parts := []string{keyHint("↑↓", "move"), keyHint("enter", "attach")}
@@ -872,6 +1047,71 @@ func (m Model) selectedDestination() (catalog.Destination, bool) {
 	return visible[m.cursor], true
 }
 
+func (m Model) selectedAttachEnabled() bool {
+	if !m.attachEnabled {
+		return false
+	}
+	destination, ok := m.selectedDestination()
+	return ok && m.destinationCurrent(destination)
+}
+
+func (m Model) selectedDestinationStale() bool {
+	destination, ok := m.selectedDestination()
+	return ok && m.inventoryAware && !m.destinationCurrent(destination)
+}
+
+func (m Model) destinationCurrent(destination catalog.Destination) bool {
+	if !m.inventoryAware {
+		return true
+	}
+	switch destination.Endpoint.(type) {
+	case catalog.LocalEndpoint:
+		return m.localSnapshot.loaded && m.localSnapshot.current
+	case catalog.SpriteEndpoint:
+		return m.spriteSnapshot.loaded && m.spriteSnapshot.current
+	default:
+		return false
+	}
+}
+
+func (m Model) hasAttachableDestinations() bool {
+	if !m.inventoryAware {
+		return len(m.destinations) > 0
+	}
+	return (m.localSnapshot.loaded && m.localSnapshot.current && len(m.localSnapshot.rows) > 0) ||
+		(m.spriteSnapshot.loaded && m.spriteSnapshot.current && len(m.spriteSnapshot.rows) > 0)
+}
+
+func (m *Model) reconcileCreateBlock() {
+	if m.createBlock == "" {
+		return
+	}
+	rows := m.destinations
+	if m.inventoryAware {
+		if !m.spriteSnapshot.loaded || !m.spriteSnapshot.current {
+			return
+		}
+		rows = m.spriteSnapshot.rows
+	}
+	for _, destination := range rows {
+		if endpoint, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok && endpoint.Name == m.createBlock {
+			m.createBlock = ""
+			return
+		}
+	}
+}
+
+func (m *Model) restoreCursor(id catalog.DestinationID) {
+	visible := m.visibleDestinations()
+	for index, destination := range visible {
+		if destination.ID == id {
+			m.cursor = index
+			return
+		}
+	}
+	m.cursor = min(m.cursor, max(0, len(visible)-1))
+}
+
 func (m Model) visibleDestinations() []catalog.Destination {
 	if m.filter == "" {
 		return m.destinations
@@ -887,6 +1127,9 @@ func (m Model) visibleDestinations() []catalog.Destination {
 }
 
 func (m Model) selectedLabel() string {
+	if m.activePrepare.kind == prepareSprite && m.activePrepare.sprite.name != "" {
+		return printable(m.activePrepare.sprite.name)
+	}
 	for _, destination := range m.destinations {
 		if destination.ID == m.selectedID {
 			return printable(destination.Label)
@@ -950,6 +1193,52 @@ func (m Model) nameView() string {
 	return strings.Join(parts, "\n")
 }
 
+func (m Model) spriteTransportView() string {
+	parts := []string{
+		titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ "+printable(m.transportTarget.name)+" / Transport"),
+		"",
+		"Choose how to open this Sprite.",
+		"",
+	}
+	options := []struct {
+		title       string
+		labels      string
+		explanation string
+	}{
+		{
+			title:       "Native Sprite terminal",
+			labels:      "preview · recommended",
+			explanation: "Herdr and its config live in the Sprite.",
+		},
+		{
+			title:       "SSH thin client",
+			labels:      "fallback",
+			explanation: "Local Herdr and your SSH agent are used.",
+		},
+	}
+	for index, option := range options {
+		marker := "  "
+		style := lipgloss.NewStyle()
+		selected := (index == 0 && m.transportTarget.transport == catalog.NativePreview) ||
+			(index == 1 && m.transportTarget.transport == catalog.SSHFallback)
+		if selected {
+			marker = accentStyle.Render("› ")
+			style = selectedStyle
+		}
+		if m.width >= 52 {
+			parts = append(parts, marker+style.Render(option.title)+"  "+accentStyle.Render(option.labels))
+		} else {
+			parts = append(parts, marker+style.Render(option.title), "  "+accentStyle.Render(option.labels))
+		}
+		parts = append(parts, "  "+mutedStyle.Render(option.explanation))
+		if index == 0 {
+			parts = append(parts, "")
+		}
+	}
+	parts = append(parts, "", keyHint("↑↓/jk", "switch")+"   "+keyHint("enter", "continue")+"   "+keyHint("esc", "cancel"))
+	return strings.Join(parts, "\n")
+}
+
 func (m Model) sshKeyView() string {
 	source := m.sshKeySource
 	if source == "" {
@@ -991,11 +1280,12 @@ func (m Model) sshKeyView() string {
 }
 
 func (m Model) hostKeyView() string {
+	prepared, _ := m.prepared.(catalog.PreparedProcessAttach)
 	return strings.Join([]string{
 		titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ Verify host key"),
 		"",
 		"Authenticated through the Sprites API:",
-		accentStyle.Render(m.prepared.Fingerprint),
+		accentStyle.Render(prepared.Fingerprint),
 		"",
 		"OpenSSH must show the same fingerprint.",
 		"",
@@ -1003,7 +1293,7 @@ func (m Model) hostKeyView() string {
 	}, "\n")
 }
 
-func destinationRows(destinations []catalog.Destination, cursor, width int) ([]string, int) {
+func destinationRows(destinations []catalog.Destination, cursor, width int, stale func(catalog.Destination) bool) ([]string, int) {
 	rows := make([]string, 0, len(destinations)+4)
 	selectedLine := 0
 	previousGroup := ""
@@ -1019,7 +1309,7 @@ func destinationRows(destinations []catalog.Destination, cursor, width int) ([]s
 		if index == cursor {
 			selectedLine = len(rows)
 		}
-		rows = append(rows, destinationLine(destination, index == cursor, width))
+		rows = append(rows, destinationLine(destination, index == cursor, stale(destination), width))
 	}
 	return rows, selectedLine
 }
@@ -1035,7 +1325,7 @@ func destinationGroup(destination catalog.Destination) string {
 	}
 }
 
-func destinationLine(destination catalog.Destination, selected bool, width int) string {
+func destinationLine(destination catalog.Destination, selected, stale bool, width int) string {
 	width = min(width, 72)
 	state, symbol := "unknown", "?"
 	stateStyle := mutedStyle
@@ -1052,6 +1342,9 @@ func destinationLine(destination catalog.Destination, selected bool, width int) 
 		if status.Lifecycle == spriteapi.Running {
 			symbol, stateStyle = "●", runningStyle
 		}
+	}
+	if stale {
+		state, symbol, stateStyle = "stale", "!", warningStyle
 	}
 	marker := "  "
 	labelStyle := lipgloss.NewStyle()
@@ -1074,7 +1367,16 @@ func keyHint(key, action string) string {
 	return keyStyle.Render(key) + " " + mutedStyle.Render(action)
 }
 
+func closePrepared(prepared catalog.PreparedAttach) {
+	if prepared != nil {
+		_ = prepared.Close()
+	}
+}
+
 func prepareFailureNotice(err error) string {
+	if err == nil {
+		return "Couldn’t prepare destination."
+	}
 	message := printable(err.Error())
 	if strings.Contains(message, "SSH_AUTH_SOCK is unset") {
 		return "SSH key required. Start ssh-agent, load a key with ssh-add, then try again."

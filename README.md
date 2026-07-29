@@ -8,7 +8,8 @@ terminal to the selected destination and refreshes after you detach with
 
 - Go 1.25.8 or newer
 - `herdr` in `PATH`
-- Optional Sprite support: `SPRITE_TOKEN`, `ssh-agent`, and `ssh-add`
+- Optional Sprite support: `SPRITE_TOKEN`
+- SSH fallback only: `ssh-agent` and `ssh-add`
 
 ## Install
 
@@ -30,23 +31,39 @@ sends one create request and never retries it. An unknown outcome blocks another
 creation for that name until a complete inventory contains it or you reconcile
 it outside `hrd`.
 
-Before a remote attach, `hrd` checks `SSH_AUTH_SOCK`, then 1Password's standard
-agent socket. It uses a sole key automatically; when an agent exposes several,
-the picker asks which one to use and remembers that choice for the current run.
-Only the selected public key is installed in the Sprite.
+Selecting a Sprite opens two fixed choices:
+
+- `Native Sprite terminal` is the preview default. It runs
+  `/home/sprite/.local/bin/herdr` inside the Sprite with the Sprites terminal
+  API. Herdr and its config live in the Sprite; no SSH key or service is needed.
+- `SSH thin client` keeps local Herdr and local integrations in use. It is a
+  temporary fallback while native attachment is tested.
+
+For native attachment, `hrd` checks the fixed Herdr path. When Herdr is absent,
+it downloads <https://herdr.dev/install.sh> to a validated temporary path, runs
+that file with `/bin/sh`, removes it, and checks that `herdr --version` runs.
+Herdr publishes no checksum or signature manifest for this installer. HTTPS,
+its redirects, the downloaded script, and the asset URLs chosen by that script
+form the trust boundary. The installer is the launcher's sole shell use; no user
+text enters its command or arguments.
+
+The SSH fallback checks `SSH_AUTH_SOCK`, then 1Password's standard agent socket.
+It uses a sole key automatically; when an agent exposes several, the picker asks
+which one to use and remembers that choice for the current run. Only the
+selected public key is installed in the Sprite.
 
 When no usable key exists, `hrd` starts a private foreground agent and hands the
 terminal to plain `ssh-add`. With no arguments, `ssh-add` loads OpenSSH's default
 identities and owns any passphrase prompt. `hrd` never parses private-key bytes
 or puts a key path in argv.
 
-It installs OpenSSH when needed, writes the public keys to
+The fallback installs OpenSSH when needed, writes the selected public key to
 `/home/sprite/.ssh/hrd_authorized_keys`, and creates or updates the fixed
 `hrd-sshd` service. It opens an ephemeral loopback-only SSH bridge. Tokens stay
 in process memory. The private agent and its socket are removed when `hrd`
 exits.
 
-The picker shows the authenticated SSH host-key fingerprint before terminal
+The picker shows the authenticated SSH host-key fingerprint before fallback
 handoff. Compare it with OpenSSH's prompt. Herdr may ask to accept the host key,
 install its matching remote binary, or restart a mismatched server. If a reused
 loopback port has an old host key, remove only the exact entry OpenSSH names:
@@ -68,4 +85,5 @@ q       quit when the filter is not editing
 ctrl+c  quit
 ```
 
-The launcher invokes `herdr` directly with fixed arguments and no shell.
+The launcher uses only fixed Herdr commands. It never interpolates shell source
+or accepts user-supplied commands.

@@ -24,7 +24,8 @@ Usage:
 
 Sprite support:
   SPRITE_TOKEN  enable Sprite inventory, creation, and attach
-  SSH agent     SSH_AUTH_SOCK, 1Password, or an hrd-managed fallback
+  Native        default; Herdr and its config run inside the Sprite
+  SSH fallback  local Herdr uses SSH_AUTH_SOCK, 1Password, or hrd-managed ssh-add
 
 Keys:
   ↑/↓, j/k  move
@@ -59,7 +60,12 @@ func run(args []string, stdout, stderr *os.File) int {
 	if token != "" {
 		agentManager := sshagent.NewManager(root, os.Getenv("SSH_AUTH_SOCK"))
 		defer func() { _ = agentManager.Close() }()
-		operations = catalog.NewSpriteOperations(local, sprites.New(root, token, agentManager))
+		provider := sprites.New(root, token, agentManager)
+		defer func() {
+			cancel()
+			_ = provider.Close()
+		}()
+		operations = catalog.NewSpriteOperations(local, provider)
 	}
 	program := tea.NewProgram(ui.New(root, operations), tea.WithContext(root))
 	if _, err := program.Run(); err != nil {

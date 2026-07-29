@@ -40,15 +40,27 @@ func (c *Client) openBridge(name, fingerprint string) (Prepared, error) {
 }
 func (c *Client) closeAll() {
 	c.mu.Lock()
-	c.closing = true
-	bridges := make([]*bridge, 0, len(c.bridges))
-	for b := range c.bridges {
-		bridges = append(bridges, b)
+	if c.closed == nil {
+		c.closed = make(chan struct{})
 	}
+	closed := c.closed
 	c.mu.Unlock()
-	for _, b := range bridges {
-		_ = b.Close()
-	}
+
+	c.shutdownOnce.Do(func() {
+		c.mu.Lock()
+		c.closing = true
+		bridges := make([]*bridge, 0, len(c.bridges))
+		for b := range c.bridges {
+			bridges = append(bridges, b)
+		}
+		c.mu.Unlock()
+		for _, b := range bridges {
+			_ = b.Close()
+		}
+		c.nativeWait.Wait()
+		close(closed)
+	})
+	<-closed
 }
 func (b *bridge) Close() error {
 	b.once.Do(func() {

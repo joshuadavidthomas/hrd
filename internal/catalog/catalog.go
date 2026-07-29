@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os/exec"
 	"sort"
@@ -59,21 +60,40 @@ type Destination struct {
 	Status   ObservedStatus
 }
 
-// PreparedAttach contains the arguments for the fixed herdr executable.
-// HerdrArgs returns a copy so a caller cannot mutate stored preparation state.
-type PreparedAttach struct {
+// TerminalCommand is a provider-owned interactive command. Its shape matches
+// Bubble Tea's ExecCommand without coupling the catalog to the UI package.
+type TerminalCommand interface {
+	Run() error
+	SetStdin(io.Reader)
+	SetStdout(io.Writer)
+	SetStderr(io.Writer)
+}
+
+// PreparedAttach is one closed attachment result: a local process or a native
+// provider terminal. Both variants have the same cleanup contract.
+type PreparedAttach interface {
+	preparedAttach()
+	Close() error
+}
+
+// PreparedProcessAttach runs the fixed local herdr executable. HerdrArgs
+// returns a copy so callers cannot mutate stored preparation state.
+type PreparedProcessAttach struct {
 	herdrArgs     []string
 	sshAuthSocket string
 	Fingerprint   string
 	close         *attachCloseState
 }
+
 type attachCloseState struct {
 	once sync.Once
 	fn   func() error
 	err  error
 }
 
-func (p PreparedAttach) Close() error {
+func (PreparedProcessAttach) preparedAttach() {}
+
+func (p PreparedProcessAttach) Close() error {
 	if p.close == nil {
 		return nil
 	}
@@ -81,14 +101,29 @@ func (p PreparedAttach) Close() error {
 	return p.close.err
 }
 
-// HerdrArgs returns a fresh copy of the arguments to pass to herdr.
-func (p PreparedAttach) HerdrArgs() []string {
+func (p PreparedProcessAttach) HerdrArgs() []string {
 	return append([]string(nil), p.herdrArgs...)
 }
 
-// SSHAuthSocket returns the explicit agent socket for a Sprite Herdr child.
+// SSHAuthSocket returns the explicit agent socket for an SSH fallback child.
 // Local attachments return an empty string and inherit the caller environment.
-func (p PreparedAttach) SSHAuthSocket() string { return p.sshAuthSocket }
+func (p PreparedProcessAttach) SSHAuthSocket() string { return p.sshAuthSocket }
+
+// PreparedNativeAttach runs the fixed Herdr executable inside a Sprite PTY.
+type PreparedNativeAttach struct {
+	Command TerminalCommand
+}
+
+func (PreparedNativeAttach) preparedAttach() {}
+func (PreparedNativeAttach) Close() error    { return nil }
+
+// SpriteTransport is one fixed Sprite attachment path.
+type SpriteTransport uint8
+
+const (
+	NativePreview SpriteTransport = iota + 1
+	SSHFallback
+)
 
 var (
 	// ErrInvalidDestination means source data or a selected destination broke a
@@ -125,7 +160,7 @@ func (o *LocalOperations) List(ctx context.Context) ([]Destination, error) {
 // The context check lets cancellation win before preparation begins.
 func (*LocalOperations) Prepare(ctx context.Context, destination Destination) (PreparedAttach, error) {
 	if err := ctx.Err(); err != nil {
-		return PreparedAttach{}, err
+		return nil, err
 	}
 	return Prepare(destination)
 }
@@ -164,22 +199,22 @@ func LocalDestinations(sessions []herdr.Session) ([]Destination, error) {
 // program name remains the caller's fixed responsibility.
 func Prepare(destination Destination) (PreparedAttach, error) {
 	if destination.Session == "" {
-		return PreparedAttach{}, fmt.Errorf("%w: empty session name", ErrInvalidDestination)
+		return nil, fmt.Errorf("%w: empty session name", ErrInvalidDestination)
 	}
 	if _, ok := destination.Endpoint.(LocalEndpoint); !ok {
-		return PreparedAttach{}, fmt.Errorf("%w: unsupported endpoint", ErrInvalidDestination)
+		return nil, fmt.Errorf("%w: unsupported endpoint", ErrInvalidDestination)
 	}
 	if _, ok := destination.Status.(LocalSessionStatus); !ok {
-		return PreparedAttach{}, fmt.Errorf("%w: local destination has non-local status", ErrInvalidDestination)
+		return nil, fmt.Errorf("%w: local destination has non-local status", ErrInvalidDestination)
 	}
 	if destination.ID != localDestinationID(destination.Session) {
-		return PreparedAttach{}, fmt.Errorf("%w: ID does not match local session", ErrInvalidDestination)
+		return nil, fmt.Errorf("%w: ID does not match local session", ErrInvalidDestination)
 	}
 
 	if destination.Session == "default" {
-		return PreparedAttach{}, nil
+		return PreparedProcessAttach{}, nil
 	}
-	return PreparedAttach{herdrArgs: []string{"--session", destination.Session}}, nil
+	return PreparedProcessAttach{herdrArgs: []string{"--session", destination.Session}}, nil
 }
 
 func localDestinationID(session string) DestinationID {
@@ -193,8 +228,8 @@ func SpriteDestinations(records []spriteapi.Sprite) ([]Destination, error) {
 	rows := make([]Destination, 0, len(records))
 	seen := map[DestinationID]struct{}{}
 	for _, record := range records {
-		if record.Name == "" {
-			return nil, fmt.Errorf("%w: Sprite has an empty name", ErrInvalidDestination)
+		if err := spriteapi.ValidName(record.Name); err != nil {
+			return nil, fmt.Errorf("%w: Sprite has an invalid name", ErrInvalidDestination)
 		}
 		id := spriteDestinationID(record.Name)
 		if _, ok := seen[id]; ok {
@@ -206,13 +241,13 @@ func SpriteDestinations(records []spriteapi.Sprite) ([]Destination, error) {
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Label < rows[j].Label })
 	return rows, nil
 }
-func PrepareSprite(name string, prepared spriteapi.Prepared) (PreparedAttach, error) {
-	if name == "" || prepared.Port <= 0 {
+func PrepareSpriteSSH(name string, prepared spriteapi.Prepared) (PreparedAttach, error) {
+	if spriteapi.ValidName(name) != nil || prepared.Port <= 0 {
 		_ = prepared.Close()
-		return PreparedAttach{}, fmt.Errorf("%w: invalid Sprite preparation", ErrInvalidDestination)
+		return nil, fmt.Errorf("%w: invalid Sprite SSH preparation", ErrInvalidDestination)
 	}
 	target := (&url.URL{Scheme: "ssh", User: url.User("sprite"), Host: fmt.Sprintf("127.0.0.1:%d", prepared.Port)}).String()
-	return PreparedAttach{herdrArgs: []string{"--remote", target}, sshAuthSocket: prepared.SSHAuthSocket, Fingerprint: prepared.Fingerprint, close: &attachCloseState{fn: prepared.Close}}, nil
+	return PreparedProcessAttach{herdrArgs: []string{"--remote", target}, sshAuthSocket: prepared.SSHAuthSocket, Fingerprint: prepared.Fingerprint, close: &attachCloseState{fn: prepared.Close}}, nil
 }
 
 type SpriteOperations struct {
@@ -265,16 +300,13 @@ func (o *SpriteOperations) List(ctx context.Context) ([]Destination, error) {
 	return rows, nil
 }
 func (o *SpriteOperations) Prepare(ctx context.Context, destination Destination) (PreparedAttach, error) {
-	switch endpoint := destination.Endpoint.(type) {
+	switch destination.Endpoint.(type) {
 	case LocalEndpoint:
 		return o.local.Prepare(ctx, destination)
 	case SpriteEndpoint:
-		if destination.Session != "default" || destination.ID != spriteDestinationID(endpoint.Name) {
-			return PreparedAttach{}, fmt.Errorf("%w: invalid Sprite destination", ErrInvalidDestination)
-		}
-		return o.PrepareSprite(ctx, endpoint.Name)
+		return nil, fmt.Errorf("%w: Sprite transport is required", ErrInvalidDestination)
 	default:
-		return PreparedAttach{}, fmt.Errorf("%w: unsupported endpoint", ErrInvalidDestination)
+		return nil, fmt.Errorf("%w: unsupported endpoint", ErrInvalidDestination)
 	}
 }
 func (o *SpriteOperations) Create(ctx context.Context, name string) spriteapi.CreateResult {
@@ -311,10 +343,27 @@ func SSHKeyChoices(err error) (string, []SSHIdentity, bool) {
 // NeedsSSHKey reports the one pre-effect failure that hrd can repair with
 // plain ssh-add before retrying the pending operation.
 func NeedsSSHKey(err error) bool { return sshagent.KeyRequired(err) }
-func (o *SpriteOperations) PrepareSprite(ctx context.Context, name string) (PreparedAttach, error) {
-	prepared, err := o.sprites.Prepare(ctx, name)
-	if err != nil {
-		return PreparedAttach{}, err
+func (o *SpriteOperations) PrepareSprite(ctx context.Context, name string, transport SpriteTransport) (PreparedAttach, error) {
+	if err := spriteapi.ValidName(name); err != nil {
+		return nil, fmt.Errorf("%w: invalid Sprite name", ErrInvalidDestination)
 	}
-	return PrepareSprite(name, prepared)
+	switch transport {
+	case NativePreview:
+		command, err := o.sprites.PrepareNative(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if command == nil {
+			return nil, fmt.Errorf("%w: native Sprite preparation returned no command", ErrInvalidDestination)
+		}
+		return PreparedNativeAttach{Command: command}, nil
+	case SSHFallback:
+		prepared, err := o.sprites.PrepareSSH(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		return PrepareSpriteSSH(name, prepared)
+	default:
+		return nil, fmt.Errorf("%w: unsupported Sprite transport", ErrInvalidDestination)
+	}
 }

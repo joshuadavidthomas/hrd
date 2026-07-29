@@ -2,7 +2,13 @@ package sprites
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+
+	sdk "github.com/superfly/sprites-go"
 
 	"github.com/joshuadavidthomas/hrd/internal/sshagent"
 )
@@ -21,16 +27,30 @@ func TestValidName(t *testing.T) {
 	}
 }
 
-func TestCreateRequiresAKeyBeforeCallingSDK(t *testing.T) {
+func TestCreateMakesOneProviderRequestWithoutAgentAccess(t *testing.T) {
 	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sprites" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprint(w, `{"name":"valid-name"}`)
+	}))
+	defer server.Close()
+
 	root, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	manager := sshagent.NewManager(root, "")
 	_ = manager.Close()
-	client := &Client{agent: manager}
+	client := &Client{sdk: sdk.New("token", sdk.WithBaseURL(server.URL)), agent: manager}
 	result := client.Create(context.Background(), "valid-name")
-	if !result.Rejected || !sshagent.KeyRequired(result.Err) {
-		t.Fatalf("Create() result = %#v, want key-required rejection", result)
+	if !result.Confirmed || result.Err != nil {
+		t.Fatalf("Create() result = %#v, want confirmed creation", result)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("provider requests = %d, want 1", got)
 	}
 }
 

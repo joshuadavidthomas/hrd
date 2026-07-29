@@ -1,4 +1,4 @@
-// Package sprites translates the Sprites API and owns hrd's fixed SSH setup.
+// Package sprites translates the Sprites API and owns hrd's fixed remote transports.
 package sprites
 
 import (
@@ -51,13 +51,18 @@ type CreateResult struct {
 
 // Client keeps the token in memory and owns every bridge derived from root.
 type Client struct {
-	sdk     *sdk.Client
-	token   string
-	root    context.Context
-	agent   *sshagent.Manager
-	mu      sync.Mutex
-	closing bool
-	bridges map[*bridge]struct{}
+	sdk          *sdk.Client
+	token        string
+	root         context.Context
+	agent        *sshagent.Manager
+	nativeRunner nativeCommandRunner
+	nativeDeps   nativeDependencies
+	mu           sync.Mutex
+	closing      bool
+	bridges      map[*bridge]struct{}
+	nativeWait   sync.WaitGroup
+	shutdownOnce sync.Once
+	closed       chan struct{}
 }
 
 func New(root context.Context, token string, agentManager *sshagent.Manager) *Client {
@@ -68,7 +73,8 @@ func New(root context.Context, token string, agentManager *sshagent.Manager) *Cl
 		panic("sprites: nil ssh-agent manager")
 	}
 	httpClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	c := &Client{sdk: sdk.New(token, sdk.WithHTTPClient(httpClient), sdk.WithDisableControl()), token: token, root: root, agent: agentManager, bridges: make(map[*bridge]struct{})}
+	provider := sdk.New(token, sdk.WithHTTPClient(httpClient), sdk.WithDisableControl())
+	c := &Client{sdk: provider, token: token, root: root, agent: agentManager, nativeRunner: sdkNativeCommandRunner{client: provider}, nativeDeps: productionNativeDependencies(), bridges: make(map[*bridge]struct{}), closed: make(chan struct{})}
 	go func() { <-root.Done(); c.closeAll() }()
 	return c
 }
@@ -108,7 +114,7 @@ func (c *Client) List(ctx context.Context) ([]Sprite, error) {
 	}
 }
 
-// Create performs one billable request only. Agent preflight happens before it.
+// Create validates the name and performs one billable provider request.
 func (c *Client) Create(ctx context.Context, name string) CreateResult {
 	if err := ValidName(name); err != nil {
 		return CreateResult{Name: name, Rejected: true, Err: err}
@@ -116,11 +122,6 @@ func (c *Client) Create(ctx context.Context, name string) CreateResult {
 	if c == nil {
 		return CreateResult{Name: name, Rejected: true, Err: errors.New("Sprite access is disabled")}
 	}
-	credentials, err := c.agent.Load(ctx)
-	if err != nil {
-		return CreateResult{Name: name, Rejected: true, Err: err}
-	}
-	_ = credentials.Close()
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
 	var wrote bool
@@ -153,7 +154,7 @@ func (p Prepared) Close() error {
 	return p.close()
 }
 
-func (c *Client) Prepare(ctx context.Context, name string) (Prepared, error) {
+func (c *Client) PrepareSSH(ctx context.Context, name string) (Prepared, error) {
 	if c == nil {
 		return Prepared{}, errors.New("Sprite access is disabled")
 	}
@@ -288,6 +289,15 @@ func (c *Client) SSHAddCommand(ctx context.Context) (*exec.Cmd, error) {
 
 func (c *Client) SelectSSHKey(fingerprint string) error {
 	return c.agent.Select(fingerprint)
+}
+
+// Close cancels admission of new leases and waits for bridge and native
+// preparation cleanup already owned by the client.
+func (c *Client) Close() error {
+	if c != nil {
+		c.closeAll()
+	}
+	return nil
 }
 
 func lifecycle(value string) State {
