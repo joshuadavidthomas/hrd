@@ -1,0 +1,6 @@
+/hrd
+/coverage.out
+/coverage.html
+.idea/
+.vscode/
+*.swp
