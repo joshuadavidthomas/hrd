@@ -15,6 +15,7 @@ import (
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
+	"github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
 type fakeOperations struct {
@@ -48,7 +49,7 @@ func TestInitialLoadProducesReadySelectableRows(t *testing.T) {
 	if model.phase != phaseLoading || model.operationID != 1 {
 		t.Fatalf("new phase/id = (%v, %d), want (loading, 1)", model.phase, model.operationID)
 	}
-	if content := model.View().Content; !strings.Contains(content, "Loading local sessions") {
+	if content := model.View().Content; !strings.Contains(content, "Loading destinations") {
 		t.Fatalf("loading view = %q", content)
 	}
 
@@ -63,9 +64,35 @@ func TestInitialLoadProducesReadySelectableRows(t *testing.T) {
 		t.Fatalf("list calls = %d, want 1", operations.listCalls.Load())
 	}
 	content := model.View().Content
-	for _, want := range []string{"default", "Herdr running", "alpha", "Herdr stopped", "enter attach", "r refresh", "/ filter", "? help"} {
+	for _, want := range []string{"Local", "default", "running", "alpha", "stopped", "attach", "refresh", "search", "help"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("ready view %q does not contain %q", content, want)
+		}
+	}
+}
+
+func TestReadyViewGroupsLocalAndSpriteDestinations(t *testing.T) {
+	t.Parallel()
+	model := readyModel(t, &fakeOperations{})
+	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.destinations = append(model.destinations, spriteRows...)
+	content := model.View().Content
+	for _, want := range []string{"2 local", "1 Sprite", "Local", "Sprites", "devbox", "cold"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("view %q does not contain %q", content, want)
+		}
+	}
+}
+
+func TestMissingAgentNoticeGivesNextAction(t *testing.T) {
+	t.Parallel()
+	notice := prepareFailureNotice(errors.New("ssh-agent is not available: SSH_AUTH_SOCK is unset"))
+	for _, want := range []string{"SSH key required", "ssh-agent", "ssh-add", "try again"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("notice %q does not contain %q", notice, want)
 		}
 	}
 }
@@ -271,7 +298,7 @@ func TestFailedRefreshAfterAttachKeepsRowsNoticeAndDisablesAttachUntilRetry(t *t
 		t.Fatalf("failed refresh phase/enabled/rows = (%v, %v, %d), want ready/false/2", model.phase, model.attachEnabled, len(model.destinations))
 	}
 	content := model.View().Content
-	for _, want := range []string{"default", "alpha", "Attach failed: attach broke", "Refresh failed: local inventory unavailable", "r retry refresh"} {
+	for _, want := range []string{"default", "alpha", "Attach failed: attach broke", "Refresh failed: local inventory unavailable", "retry"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("failed refresh view %q does not contain %q", content, want)
 		}
@@ -303,7 +330,7 @@ func TestInitialFailureRetriesAndStaleCompletionCannotReplaceRetry(t *testing.T)
 	if model.phase != phaseInitialLoadFailed || model.attachEnabled {
 		t.Fatalf("initial failure phase/enabled = (%v, %v)", model.phase, model.attachEnabled)
 	}
-	for _, want := range []string{"Could not load local sessions", "herdr missing", "r retry"} {
+	for _, want := range []string{"Couldn’t load destinations", "herdr missing", "retry"} {
 		if !strings.Contains(model.View().Content, want) {
 			t.Errorf("failure view %q does not contain %q", model.View().Content, want)
 		}
@@ -423,6 +450,18 @@ func TestRefreshQuitCancelsBlockedListing(t *testing.T) {
 	}
 }
 
+func TestSpriteNameAllowsQAndOnlyControlCQuits(t *testing.T) {
+	t.Parallel()
+	model := readyModel(t, &fakeOperations{})
+	model.phase = phaseNamingSprite
+	model, cmd := runUpdate(t, model, press("q"))
+	if cmd != nil || model.quitting || model.spriteName != "q" {
+		t.Fatalf("name entry after q = (cmd %v, quitting %v, name %q)", cmd, model.quitting, model.spriteName)
+	}
+	_, quitCmd := runUpdate(t, model, press("ctrl+c"))
+	assertQuitCmd(t, quitCmd)
+}
+
 func TestFilteringMakesQEditableAndOnlyControlCQuits(t *testing.T) {
 	t.Parallel()
 
@@ -441,7 +480,7 @@ func TestFilteringMakesQEditableAndOnlyControlCQuits(t *testing.T) {
 	if model.filter != "qr/?" {
 		t.Fatalf("filter = %q, want %q", model.filter, "qr/?")
 	}
-	if !strings.Contains(model.View().Content, "q types q") {
+	if !strings.Contains(model.View().Content, "ctrl+c") {
 		t.Fatalf("filter view = %q", model.View().Content)
 	}
 	model, _ = runUpdate(t, model, press("enter"))
@@ -463,7 +502,7 @@ func TestHelpAndFilterKeysHaveTheirDocumentedActions(t *testing.T) {
 
 	model := readyModel(t, &fakeOperations{})
 	model, _ = runUpdate(t, model, press("?"))
-	if !model.showHelp || !strings.Contains(model.View().Content, "? close help") {
+	if !model.showHelp || !strings.Contains(model.View().Content, "close help") {
 		t.Fatalf("? did not open help: %q", model.View().Content)
 	}
 	model, _ = runUpdate(t, model, press("/"))
@@ -494,7 +533,7 @@ func TestPrepareFailureReturnsToReadyWithoutExec(t *testing.T) {
 	if cmd != nil || execCalls != 0 || model.phase != phaseReady || !model.attachEnabled {
 		t.Fatalf("prepare failure cmd/exec/phase/enabled = (%v, %d, %v, %v)", cmd, execCalls, model.phase, model.attachEnabled)
 	}
-	if !strings.Contains(model.View().Content, "Prepare failed: cannot prepare") {
+	if !strings.Contains(model.View().Content, "Couldn’t prepare destination: cannot prepare") {
 		t.Fatalf("prepare failure view = %q", model.View().Content)
 	}
 }
@@ -522,7 +561,7 @@ func TestLoadingEmptyFailureAndNarrowViewsStayReadable(t *testing.T) {
 
 	loading := New(context.Background(), &fakeOperations{})
 	loading, _ = runUpdate(t, loading, tea.WindowSizeMsg{Width: 8, Height: 3})
-	assertReadableView(t, loading, "Loading")
+	assertReadableView(t, loading, "Loadin")
 	assertViewFits(t, loading.View(), 8, 3)
 
 	emptyOps := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) {
@@ -530,7 +569,7 @@ func TestLoadingEmptyFailureAndNarrowViewsStayReadable(t *testing.T) {
 	}}
 	empty := readyModel(t, emptyOps)
 	empty, _ = runUpdate(t, empty, tea.WindowSizeMsg{Width: 8, Height: 3})
-	assertReadableView(t, empty, "No loca")
+	assertReadableView(t, empty, "No des")
 	assertViewFits(t, empty.View(), 8, 3)
 	if _, cmd := runUpdate(t, empty, press("enter")); cmd != nil {
 		t.Fatal("empty ready view allowed attach")
@@ -541,7 +580,7 @@ func TestLoadingEmptyFailureAndNarrowViewsStayReadable(t *testing.T) {
 	}})
 	failure, _ = runUpdate(t, failure, runCmd(t, failure.Init()))
 	failure, _ = runUpdate(t, failure, tea.WindowSizeMsg{Width: 8, Height: 3})
-	assertReadableView(t, failure, "Could n")
+	assertReadableView(t, failure, "Couldn")
 	assertViewFits(t, failure.View(), 8, 3)
 }
 

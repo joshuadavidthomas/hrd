@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
@@ -188,7 +189,8 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.phase == phaseAttaching {
 		return m, nil
 	}
-	if key.Matches(msg, m.keys.force) || (key.Matches(msg, m.keys.quit) && !m.editingFilter) {
+	textEditing := m.editingFilter || m.phase == phaseNamingSprite
+	if key.Matches(msg, m.keys.force) || (key.Matches(msg, m.keys.quit) && !textEditing) {
 		m.cancelOperation()
 		_ = m.prepared.Close()
 		m.quitting = true
@@ -370,7 +372,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 	m.cancelOperation()
 	if msg.err != nil {
 		_ = msg.prepared.Close()
-		m.attachNotice = "Prepare failed: " + msg.err.Error()
+		m.attachNotice = prepareFailureNotice(msg.err)
 		if m.preparingSprite {
 			m.phase = phaseRefreshing
 			return m, m.beginList()
@@ -512,34 +514,41 @@ func (m *Model) cancelOperation() {
 	}
 }
 
+var (
+	titleStyle    = lipgloss.NewStyle().Bold(true)
+	selectedStyle = lipgloss.NewStyle().Bold(true)
+	accentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	runningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	warningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	mutedStyle    = lipgloss.NewStyle().Faint(true)
+	keyStyle      = lipgloss.NewStyle().Bold(true)
+)
+
 // View renders the current state in Bubble Tea v2's View value.
 func (m Model) View() tea.View {
 	var content string
 	switch m.phase {
 	case phaseLoading:
-		content = m.simpleView("Loading local sessions…", "q quit • ctrl+c quit")
+		content = m.simpleView("Loading destinations…", "q quit")
 	case phaseInitialLoadFailed:
-		content = m.simpleView(
-			"Could not load local sessions.\n"+m.loadNotice,
-			"r retry • q quit • ctrl+c quit",
-		)
+		content = m.simpleView("Couldn’t load destinations.\n"+m.loadNotice, "r retry   q quit")
 	case phaseRefreshing:
-		content = m.snapshotView("Refreshing local sessions…", "q quit • ctrl+c quit")
+		content = m.snapshotView("Refreshing destinations…", "q quit")
 	case phasePreparing:
-		content = m.snapshotView("Preparing "+m.selectedLabel()+"…", "q quit • ctrl+c quit")
+		content = m.snapshotView("Preparing "+m.selectedLabel()+"…", "q cancel")
 	case phaseNamingSprite:
-		content = m.simpleView("New Sprite (creation may incur charges): "+m.spriteName, "enter create • esc cancel • q quit")
+		content = m.nameView()
 	case phaseCreatingSprite:
-		content = m.simpleView("Creating Sprite "+m.spriteName+"…", "q quit • ctrl+c quit")
+		content = m.simpleView("Creating "+m.spriteName+"…\nThis can take a moment.", "q cancel")
 	case phaseConfirmingHostKey:
-		content = m.simpleView("Sprite SSH fingerprint: "+m.prepared.Fingerprint+"\nCompare it with OpenSSH's prompt.", "enter continue • esc cancel • q quit")
+		content = m.hostKeyView()
 	case phaseAttaching:
-		content = m.simpleView("Terminal handed to Herdr.", "")
+		content = m.simpleView("Herdr has the terminal.", "")
 	case phaseReady:
 		if len(m.destinations) == 0 {
-			body := "No local sessions found."
+			body := "No destinations found."
 			if m.loadNotice != "" {
-				body = m.loadNotice + "\n" + body
+				body = warningLine(m.loadNotice) + "\n\n" + body
 			}
 			content = m.simpleView(body, m.readyHelp())
 		} else {
@@ -556,55 +565,53 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) snapshotView(status, footer string) string {
-	parts := []string{"hrd"}
+	parts := m.header()
 	if m.attachNotice != "" {
-		parts = append(parts, clip(printable(m.attachNotice), m.width))
+		parts = append(parts, "", warningLine(m.attachNotice))
 	}
 	if m.loadNotice != "" {
-		parts = append(parts, clip(printable(m.loadNotice), m.width))
+		parts = append(parts, "", warningLine(m.loadNotice))
 	}
 	if status != "" {
-		parts = append(parts, clip(status, m.width))
+		parts = append(parts, "", accentStyle.Render("↻ "+printable(status)))
 	}
 	if m.editingFilter || m.filter != "" {
-		parts = append(parts, clip(printable("Filter: "+m.filter), m.width))
+		value := m.filter
+		if m.editingFilter {
+			value += "▏"
+		}
+		parts = append(parts, "", mutedStyle.Render("Search"), "  "+printable(value))
 	}
 
 	visible := m.visibleDestinations()
 	if len(visible) == 0 {
 		if m.filter == "" {
-			parts = append(parts, "No local sessions found.")
+			parts = append(parts, "", "No destinations found.")
 		} else {
-			parts = append(parts, "Nothing matched the filter.")
+			parts = append(parts, "", "No destinations match “"+printable(m.filter)+"”.")
 		}
 	} else {
-		available := max(1, m.height-len(parts)-footerLineCount(footer)-1)
-		start := 0
-		if m.cursor >= available {
-			start = m.cursor - available + 1
-		}
-		end := min(len(visible), start+available)
-		for index := start; index < end; index++ {
-			marker := "  "
-			if index == m.cursor {
-				marker = "> "
-			}
-			parts = append(parts, clip(marker+destinationLine(visible[index]), m.width))
-		}
+		rows, selectedLine := destinationRows(visible, m.cursor, m.width)
+		available := max(1, m.height-len(parts)-footerLineCount(footer)-2)
+		start := max(0, selectedLine-available+1)
+		end := min(len(rows), start+available)
+		parts = append(parts, "")
+		parts = append(parts, rows[start:end]...)
 	}
 	if footer != "" {
-		parts = append(parts, footer)
+		parts = append(parts, "", footer)
 	}
 	return strings.Join(parts, "\n")
 }
 
 func (m Model) simpleView(body, footer string) string {
-	parts := []string{"hrd"}
+	parts := m.header()
+	parts = append(parts, "")
 	for _, line := range strings.Split(body, "\n") {
-		parts = append(parts, clip(printable(line), m.width))
+		parts = append(parts, printable(line))
 	}
 	if m.attachNotice != "" {
-		parts = append(parts, clip(printable(m.attachNotice), m.width))
+		parts = append(parts, "", warningLine(m.attachNotice))
 	}
 	if footer != "" {
 		parts = append(parts, "", footer)
@@ -614,26 +621,31 @@ func (m Model) simpleView(body, footer string) string {
 
 func (m Model) readyHelp() string {
 	if m.editingFilter {
-		return "type to filter (q types q) • enter apply • esc cancel • ctrl+c quit"
+		return keyHint("enter", "apply") + "   " + keyHint("esc", "cancel") + "   " + keyHint("ctrl+c", "quit")
 	}
 	if m.showHelp {
-		attach := "enter attach"
+		attach := keyHint("enter", "attach")
 		if !m.attachEnabled {
-			attach = "attach disabled until refresh succeeds"
+			attach = mutedStyle.Render("attach unavailable until refresh succeeds")
+		}
+		secondLine := []string{keyHint("?", "close help"), keyHint("q", "quit")}
+		if _, ok := m.operations.(spriteOperations); ok && m.spriteCreateEnabled && m.createBlock == "" {
+			secondLine = append([]string{keyHint("n", "new Sprite")}, secondLine...)
 		}
 		return strings.Join([]string{
-			attach + " • r refresh • / filter • ? close help",
-			"↑/k up • ↓/j down • q quit • ctrl+c quit",
+			keyHint("↑↓", "move") + "   " + attach + "   " + keyHint("/", "search") + "   " + keyHint("r", "refresh"),
+			strings.Join(secondLine, "   "),
 		}, "\n")
 	}
 	if !m.attachEnabled {
-		return "r retry refresh • / filter • ? help • q quit • ctrl+c quit"
+		return keyHint("r", "retry") + "   " + keyHint("/", "search") + "   " + keyHint("?", "help") + "   " + keyHint("q", "quit")
 	}
-	create := ""
+	parts := []string{keyHint("↑↓", "move"), keyHint("enter", "attach")}
 	if _, ok := m.operations.(spriteOperations); ok && m.spriteCreateEnabled && m.createBlock == "" {
-		create = " • n new Sprite"
+		parts = append(parts, keyHint("n", "new Sprite"))
 	}
-	return "enter attach" + create + " • r refresh • / filter • ? help • q quit • ctrl+c quit"
+	parts = append(parts, keyHint("/", "search"), keyHint("r", "refresh"), keyHint("?", "help"), keyHint("q", "quit"))
+	return strings.Join(parts, "   ")
 }
 
 func (m Model) selectedDestination() (catalog.Destination, bool) {
@@ -667,19 +679,154 @@ func (m Model) selectedLabel() string {
 	return "destination"
 }
 
-func destinationLine(destination catalog.Destination) string {
-	state := "unknown status"
+func (m Model) header() []string {
+	title := titleStyle.Render("hrd")
+	if summary := m.inventorySummary(); summary != "" {
+		title += "  " + mutedStyle.Render(summary)
+	}
+	lines := []string{title}
+	if m.height >= 6 {
+		lines = append(lines, mutedStyle.Render("Choose a Herdr destination."))
+	}
+	return lines
+}
+
+func (m Model) inventorySummary() string {
+	local, sprites := 0, 0
+	for _, destination := range m.destinations {
+		switch destination.Endpoint.(type) {
+		case catalog.LocalEndpoint:
+			local++
+		case catalog.SpriteEndpoint:
+			sprites++
+		}
+	}
+	parts := make([]string, 0, 2)
+	if local > 0 {
+		parts = append(parts, fmt.Sprintf("%d local", local))
+	}
+	if sprites == 1 {
+		parts = append(parts, "1 Sprite")
+	} else if sprites > 1 {
+		parts = append(parts, fmt.Sprintf("%d Sprites", sprites))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (m Model) nameView() string {
+	value := m.spriteName + "▏"
+	if m.spriteName == "" {
+		value = mutedStyle.Render("lowercase name") + accentStyle.Render("▏")
+	}
+	parts := []string{
+		titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ New Sprite"),
+		"",
+		mutedStyle.Render("Name"),
+		"  " + value,
+		"",
+		mutedStyle.Render("Use 1–63 lowercase letters, digits, and interior hyphens."),
+		warningStyle.Render("Creation and waking may incur charges."),
+	}
+	if m.attachNotice != "" {
+		parts = append(parts, "", warningLine(m.attachNotice))
+	}
+	parts = append(parts, "", keyHint("enter", "create")+"   "+keyHint("esc", "cancel"))
+	return strings.Join(parts, "\n")
+}
+
+func (m Model) hostKeyView() string {
+	return strings.Join([]string{
+		titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ Verify host key"),
+		"",
+		"Authenticated through the Sprites API:",
+		accentStyle.Render(m.prepared.Fingerprint),
+		"",
+		"OpenSSH must show the same fingerprint.",
+		"",
+		keyHint("enter", "continue") + "   " + keyHint("esc", "cancel"),
+	}, "\n")
+}
+
+func destinationRows(destinations []catalog.Destination, cursor, width int) ([]string, int) {
+	rows := make([]string, 0, len(destinations)+4)
+	selectedLine := 0
+	previousGroup := ""
+	for index, destination := range destinations {
+		group := destinationGroup(destination)
+		if group != previousGroup {
+			if len(rows) > 0 {
+				rows = append(rows, "")
+			}
+			rows = append(rows, mutedStyle.Render(group))
+			previousGroup = group
+		}
+		if index == cursor {
+			selectedLine = len(rows)
+		}
+		rows = append(rows, destinationLine(destination, index == cursor, width))
+	}
+	return rows, selectedLine
+}
+
+func destinationGroup(destination catalog.Destination) string {
+	switch destination.Endpoint.(type) {
+	case catalog.LocalEndpoint:
+		return "Local"
+	case catalog.SpriteEndpoint:
+		return "Sprites"
+	default:
+		return "Other"
+	}
+}
+
+func destinationLine(destination catalog.Destination, selected bool, width int) string {
+	width = min(width, 72)
+	state, symbol := "unknown", "?"
+	stateStyle := mutedStyle
 	if status, ok := destination.Status.(catalog.LocalSessionStatus); ok {
 		if status.Running {
-			state = "Herdr running"
+			state, symbol, stateStyle = "running", "●", runningStyle
 		} else {
-			state = "Herdr stopped"
+			state, symbol = "stopped", "○"
 		}
 	}
 	if status, ok := destination.Status.(catalog.SpriteStatus); ok {
-		state = "Sprite " + string(status.Lifecycle)
+		state = string(status.Lifecycle)
+		symbol = "○"
+		if status.Lifecycle == spriteapi.Running {
+			symbol, stateStyle = "●", runningStyle
+		}
 	}
-	return printable(destination.Label) + "  " + state
+	marker := "  "
+	labelStyle := lipgloss.NewStyle()
+	if selected {
+		marker = accentStyle.Render("› ")
+		labelStyle = selectedStyle
+	}
+	status := stateStyle.Render(symbol + " " + state)
+	labelWidth := max(1, width-2-lipgloss.Width(status)-2)
+	label := clip(printable(destination.Label), labelWidth)
+	padding := strings.Repeat(" ", max(2, width-2-lipgloss.Width(label)-lipgloss.Width(status)))
+	return marker + labelStyle.Render(label) + padding + status
+}
+
+func warningLine(text string) string {
+	return warningStyle.Render("! ") + printable(text)
+}
+
+func keyHint(key, action string) string {
+	return keyStyle.Render(key) + " " + mutedStyle.Render(action)
+}
+
+func prepareFailureNotice(err error) string {
+	message := printable(err.Error())
+	if strings.Contains(message, "SSH_AUTH_SOCK is unset") {
+		return "SSH key required. Start ssh-agent, load a key with ssh-add, then try again."
+	}
+	if strings.Contains(message, "ssh-agent has no public keys") {
+		return "SSH key required. Load a key with ssh-add, then try again."
+	}
+	return "Couldn’t prepare destination: " + message
 }
 
 func printable(text string) string {
@@ -715,19 +862,7 @@ func clip(text string, width int) string {
 	if width == 1 {
 		return "…"
 	}
-
-	var clipped strings.Builder
-	used := 0
-	for _, r := range text {
-		runeWidth := lipgloss.Width(string(r))
-		if used+runeWidth > width-1 {
-			break
-		}
-		clipped.WriteRune(r)
-		used += runeWidth
-	}
-	clipped.WriteRune('…')
-	return clipped.String()
+	return ansi.Truncate(text, width-1, "…")
 }
 
 func footerLineCount(footer string) int {
