@@ -24,7 +24,7 @@ Usage:
 
 Sprite support:
   SPRITE_TOKEN  enable Sprite inventory, creation, and attach
-  ssh-agent     reused or started by hrd; ssh-add loads default identities
+  SSH agent     SSH_AUTH_SOCK, 1Password, or an hrd-managed fallback
 
 Keys:
   ↑/↓, j/k  move

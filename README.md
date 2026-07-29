@@ -30,11 +30,15 @@ sends one create request and never retries it. An unknown outcome blocks another
 creation for that name until a complete inventory contains it or you reconcile
 it outside `hrd`.
 
-Before a remote attach, `hrd` reuses your ssh-agent or starts a private
-foreground agent and hands the terminal to plain `ssh-add`. With no arguments,
-`ssh-add` loads OpenSSH's default identities and owns any passphrase prompt.
-`hrd` reads only the resulting public keys; it never parses private-key bytes or
-puts a key path in argv.
+Before a remote attach, `hrd` checks `SSH_AUTH_SOCK`, then 1Password's standard
+agent socket. It uses a sole key automatically; when an agent exposes several,
+the picker asks which one to use and remembers that choice for the current run.
+Only the selected public key is installed in the Sprite.
+
+When no usable key exists, `hrd` starts a private foreground agent and hands the
+terminal to plain `ssh-add`. With no arguments, `ssh-add` loads OpenSSH's default
+identities and owns any passphrase prompt. `hrd` never parses private-key bytes
+or puts a key path in argv.
 
 It installs OpenSSH when needed, writes the public keys to
 `/home/sprite/.ssh/hrd_authorized_keys`, and creates or updates the fixed

@@ -39,6 +39,7 @@ type spriteOperations interface {
 }
 type sshKeyOperations interface {
 	SSHAddCommand(context.Context) (*exec.Cmd, error)
+	SelectSSHKey(string) error
 }
 
 type phase uint8
@@ -55,6 +56,7 @@ const (
 	phaseConfirmingHostKey
 	phaseStartingSSHAgent
 	phaseAddingSSHKey
+	phaseChoosingSSHKey
 )
 
 type listDone struct {
@@ -161,6 +163,9 @@ type Model struct {
 	preparingSprite      bool
 	pending              pendingOperation
 	sshRecoveryAttempted bool
+	sshKeySource         string
+	sshKeyChoices        []catalog.SSHIdentity
+	sshKeyCursor         int
 
 	width  int
 	height int
@@ -247,6 +252,9 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.beginList()
 		}
 		return m, nil
+	}
+	if m.phase == phaseChoosingSSHKey {
+		return m.updateSSHKeyChoice(msg)
 	}
 	if m.phase != phaseReady {
 		if m.phase == phaseInitialLoadFailed && key.Matches(msg, m.keys.refresh) {
@@ -408,6 +416,9 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 	m.cancelOperation()
 	if msg.err != nil {
 		_ = msg.prepared.Close()
+		if source, choices, ok := catalog.SSHKeyChoices(msg.err); ok {
+			return m.beginSSHKeySelection(source, choices)
+		}
 		if catalog.NeedsSSHKey(msg.err) && !m.sshRecoveryAttempted {
 			return m, m.beginSSHKeyRecovery()
 		}
@@ -457,6 +468,9 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 		return m, m.beginPrepareSprite(msg.result.Name)
 	}
 	if msg.result.Rejected {
+		if source, choices, ok := catalog.SSHKeyChoices(msg.result.Err); ok {
+			return m.beginSSHKeySelection(source, choices)
+		}
 		if catalog.NeedsSSHKey(msg.result.Err) && !m.sshRecoveryAttempted {
 			return m, m.beginSSHKeyRecovery()
 		}
@@ -472,6 +486,63 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 	m.attachNotice = "Creation outcome is unknown. Reconcile " + msg.result.Name + " before creating another Sprite."
 	m.phase = phaseRefreshing
 	return m, m.beginList()
+}
+
+func (m Model) beginSSHKeySelection(source string, choices []catalog.SSHIdentity) (tea.Model, tea.Cmd) {
+	m.phase = phaseChoosingSSHKey
+	m.attachNotice = ""
+	m.sshKeySource = printable(source)
+	m.sshKeyChoices = append([]catalog.SSHIdentity(nil), choices...)
+	m.sshKeyCursor = 0
+	return m, nil
+}
+
+func (m Model) updateSSHKeyChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.up):
+		m.sshKeyCursor = max(0, m.sshKeyCursor-1)
+		return m, nil
+	case key.Matches(msg, m.keys.down):
+		m.sshKeyCursor = min(max(0, len(m.sshKeyChoices)-1), m.sshKeyCursor+1)
+		return m, nil
+	case msg.String() == "esc":
+		return m.cancelSSHKeySelection()
+	case msg.String() == "enter":
+		if m.sshKeyCursor < 0 || m.sshKeyCursor >= len(m.sshKeyChoices) {
+			return m, nil
+		}
+		operations, ok := m.operations.(sshKeyOperations)
+		if !ok {
+			m.attachNotice = "Couldn’t select an SSH key."
+			return m, nil
+		}
+		choice := m.sshKeyChoices[m.sshKeyCursor]
+		if err := operations.SelectSSHKey(choice.Fingerprint); err != nil {
+			m.attachNotice = "Couldn’t select SSH key: " + printable(err.Error())
+			return m, nil
+		}
+		m.sshKeyChoices = nil
+		m.sshKeySource = ""
+		return m.retryPending()
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) cancelSSHKeySelection() (tea.Model, tea.Cmd) {
+	m.sshKeyChoices = nil
+	m.sshKeySource = ""
+	switch m.pending.kind {
+	case pendingCreate:
+		m.phase = phaseNamingSprite
+		return m, nil
+	case pendingCreatedSprite:
+		m.phase = phaseRefreshing
+		return m, m.beginList()
+	default:
+		m.phase = phaseReady
+		return m, nil
+	}
 }
 
 func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
@@ -685,6 +756,8 @@ func (m Model) View() tea.View {
 		content = m.simpleView("Starting a private ssh-agent…", "q quit")
 	case phaseAddingSSHKey:
 		content = m.simpleView("ssh-add has the terminal.\nComplete its prompt to continue.", "")
+	case phaseChoosingSSHKey:
+		content = m.sshKeyView()
 	case phaseAttaching:
 		content = m.simpleView("Herdr has the terminal.", "")
 	case phaseReady:
@@ -874,6 +947,46 @@ func (m Model) nameView() string {
 		parts = append(parts, "", warningLine(m.attachNotice))
 	}
 	parts = append(parts, "", keyHint("enter", "create")+"   "+keyHint("esc", "cancel"))
+	return strings.Join(parts, "\n")
+}
+
+func (m Model) sshKeyView() string {
+	source := m.sshKeySource
+	if source == "" {
+		source = "ssh-agent"
+	}
+	parts := []string{
+		titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ Choose SSH key"),
+		"",
+		fmt.Sprintf("%s exposes %d keys.", source, len(m.sshKeyChoices)),
+		"Only the selected public key will be installed in the Sprite.",
+		"",
+	}
+	available := max(1, m.height-11)
+	start := max(0, m.sshKeyCursor-available+1)
+	end := min(len(m.sshKeyChoices), start+available)
+	for index := start; index < end; index++ {
+		choice := m.sshKeyChoices[index]
+		label := printable(choice.Comment)
+		if label == "" {
+			label = "Unnamed key"
+		}
+		marker := "  "
+		style := lipgloss.NewStyle()
+		if index == m.sshKeyCursor {
+			marker = accentStyle.Render("› ")
+			style = selectedStyle
+		}
+		line := marker + style.Render(label) + "  " + mutedStyle.Render(printable(choice.Algorithm))
+		parts = append(parts, clip(line, min(m.width, 72)))
+	}
+	if m.sshKeyCursor >= 0 && m.sshKeyCursor < len(m.sshKeyChoices) {
+		parts = append(parts, "", mutedStyle.Render("Fingerprint"), accentStyle.Render(m.sshKeyChoices[m.sshKeyCursor].Fingerprint))
+	}
+	if m.attachNotice != "" {
+		parts = append(parts, "", warningLine(m.attachNotice))
+	}
+	parts = append(parts, "", keyHint("↑↓", "move")+"   "+keyHint("enter", "use key")+"   "+keyHint("esc", "cancel"))
 	return strings.Join(parts, "\n")
 }
 

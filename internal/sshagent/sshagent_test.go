@@ -2,15 +2,145 @@ package sshagent
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
+
+func TestDiscoverCandidatesFindsOnePasswordSocket(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	dir := filepath.Join(home, ".1password")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(dir, "agent.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	candidates := discoverCandidates("", home, "linux")
+	if len(candidates) != 1 || candidates[0].source != "1Password" || candidates[0].addable {
+		t.Fatalf("candidates = %#v, want one read-only 1Password socket", candidates)
+	}
+}
+
+func TestManagerRequiresSelectionAndReturnsOnlyChosenKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "agent.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyring := agent.NewKeyring()
+	for _, comment := range []string{"work", "personal"} {
+		_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := keyring.Add(agent.AddedKey{PrivateKey: privateKey, Comment: comment}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			workers.Add(1)
+			go func() { defer workers.Done(); _ = agent.ServeAgent(keyring, connection); _ = connection.Close() }()
+		}
+	}()
+	root, cancel := context.WithCancel(context.Background())
+	manager := newManager(root, []socketCandidate{{path: socket, source: "1Password"}})
+	_, selectionErr := manager.Load(context.Background())
+	source, choices, ok := SelectionChoices(selectionErr)
+	if !ok || source != "1Password" || len(choices) != 2 {
+		t.Fatalf("selection = (%q, %#v, %v), error %v", source, choices, ok, selectionErr)
+	}
+	chosen := choices[1]
+	if err := manager.Select(chosen.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := manager.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() after selection error = %v", err)
+	}
+	if len(credentials.PublicKeys) != 1 || len(credentials.Signers) != 1 {
+		t.Fatalf("selected credentials = (%d keys, %d signers)", len(credentials.PublicKeys), len(credentials.Signers))
+	}
+	if got := ssh.FingerprintSHA256(credentials.Signers[0].PublicKey()); got != chosen.Fingerprint {
+		t.Fatalf("selected fingerprint = %q, want %q", got, chosen.Fingerprint)
+	}
+	_ = credentials.Close()
+	if err := keyring.RemoveAll(); err != nil {
+		t.Fatal(err)
+	}
+	_, replacement, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyring.Add(agent.AddedKey{PrivateKey: replacement, Comment: "replacement"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Load(context.Background()); !errors.Is(err, ErrSelectedKeyUnavailable) {
+		t.Fatalf("Load() after chosen key disappeared error = %v, want ErrSelectedKeyUnavailable", err)
+	}
+	_ = manager.Close()
+	cancel()
+	_ = listener.Close()
+	workers.Wait()
+}
+
+func TestEmptyEnvironmentAgentFallsThroughToOnePassword(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	emptyKeyring := agent.NewKeyring()
+	emptyServer := startTestAgentServer(t, filepath.Join(dir, "empty.sock"), emptyKeyring)
+	defer emptyServer.close()
+	onePasswordKeyring := agent.NewKeyring()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := onePasswordKeyring.Add(agent.AddedKey{PrivateKey: privateKey, Comment: "1Password key"}); err != nil {
+		t.Fatal(err)
+	}
+	onePasswordServer := startTestAgentServer(t, filepath.Join(dir, "onepassword.sock"), onePasswordKeyring)
+	defer onePasswordServer.close()
+	root, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := newManager(root, []socketCandidate{
+		{path: emptyServer.path, source: "ssh-agent", addable: true},
+		{path: onePasswordServer.path, source: "1Password", addable: false},
+	})
+	defer func() { _ = manager.Close() }()
+	credentials, err := manager.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	defer func() { _ = credentials.Close() }()
+	if manager.Socket() != onePasswordServer.path || len(credentials.PublicKeys) != 1 {
+		t.Fatalf("selected socket/keys = (%q, %d), want populated 1Password agent", manager.Socket(), len(credentials.PublicKeys))
+	}
+}
 
 func TestManagerStartsPrivateAgentAndBuildsPlainSSHAdd(t *testing.T) {
 	t.Setenv("SPRITE_TOKEN", "must-not-reach-ssh-add")
@@ -19,7 +149,7 @@ func TestManagerStartsPrivateAgentAndBuildsPlainSSHAdd(t *testing.T) {
 	}
 	root, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager := NewManager(root, "")
+	manager := newManager(root, nil)
 	defer func() { _ = manager.Close() }()
 
 	command, err := manager.SSHAddCommand(context.Background())
@@ -57,7 +187,7 @@ func TestRootCancellationStopsManagedAgent(t *testing.T) {
 		t.Skip("ssh-agent is not installed")
 	}
 	root, cancel := context.WithCancel(context.Background())
-	manager := NewManager(root, "")
+	manager := newManager(root, nil)
 	command, err := manager.SSHAddCommand(context.Background())
 	if err != nil {
 		t.Fatalf("SSHAddCommand() error = %v", err)
@@ -81,7 +211,7 @@ func TestManagerWithoutSocketNeedsAKey(t *testing.T) {
 	t.Parallel()
 	root, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager := NewManager(root, "")
+	manager := newManager(root, nil)
 	defer func() { _ = manager.Close() }()
 	_, err := manager.Load(context.Background())
 	if !errors.Is(err, ErrAgentUnavailable) || !KeyRequired(err) {
@@ -104,6 +234,43 @@ func TestWithEnvironmentReplacesSocket(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("environment has %d SSH_AUTH_SOCK entries, want 1: %#v", count, got)
 	}
+}
+
+type testAgentServer struct {
+	path     string
+	listener net.Listener
+	workers  sync.WaitGroup
+}
+
+func startTestAgentServer(t *testing.T, path string, keyring agent.Agent) *testAgentServer {
+	t.Helper()
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &testAgentServer{path: path, listener: listener}
+	server.workers.Add(1)
+	go func() {
+		defer server.workers.Done()
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			server.workers.Add(1)
+			go func() {
+				defer server.workers.Done()
+				_ = agent.ServeAgent(keyring, connection)
+				_ = connection.Close()
+			}()
+		}
+	}()
+	return server
+}
+
+func (s *testAgentServer) close() {
+	_ = s.listener.Close()
+	s.workers.Wait()
 }
 
 func environmentValue(environment []string, key string) string {

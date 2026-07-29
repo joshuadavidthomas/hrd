@@ -285,6 +285,29 @@ func (o *SpriteOperations) SSHAddCommand(ctx context.Context) (*exec.Cmd, error)
 	return o.sprites.SSHAddCommand(ctx)
 }
 
+func (o *SpriteOperations) SelectSSHKey(fingerprint string) error {
+	return o.sprites.SelectSSHKey(fingerprint)
+}
+
+// SSHIdentity is safe public metadata rendered by the key picker.
+type SSHIdentity struct {
+	Fingerprint string
+	Comment     string
+	Algorithm   string
+}
+
+func SSHKeyChoices(err error) (string, []SSHIdentity, bool) {
+	source, identities, ok := sshagent.SelectionChoices(err)
+	if !ok {
+		return "", nil, false
+	}
+	choices := make([]SSHIdentity, len(identities))
+	for index, identity := range identities {
+		choices[index] = SSHIdentity{Fingerprint: identity.Fingerprint, Comment: identity.Comment, Algorithm: identity.Algorithm}
+	}
+	return source, choices, true
+}
+
 // NeedsSSHKey reports the one pre-effect failure that hrd can repair with
 // plain ssh-add before retrying the pending operation.
 func NeedsSSHKey(err error) bool { return sshagent.KeyRequired(err) }

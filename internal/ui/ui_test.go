@@ -47,11 +47,17 @@ type fakeSSHKeyOperations struct {
 	addCalls atomic.Int32
 	command  *exec.Cmd
 	err      error
+	selected string
 }
 
 func (f *fakeSSHKeyOperations) SSHAddCommand(context.Context) (*exec.Cmd, error) {
 	f.addCalls.Add(1)
 	return f.command, f.err
+}
+
+func (f *fakeSSHKeyOperations) SelectSSHKey(fingerprint string) error {
+	f.selected = fingerprint
+	return nil
 }
 
 func TestInitialLoadProducesReadySelectableRows(t *testing.T) {
@@ -563,6 +569,42 @@ func TestHelpAndFilterKeysHaveTheirDocumentedActions(t *testing.T) {
 	visible := model.visibleDestinations()
 	if len(visible) != 1 || visible[0].Label != "alpha" {
 		t.Fatalf("filtered destinations = %#v, want alpha", visible)
+	}
+}
+
+func TestMultipleAgentKeysRequireOneSelectionBeforeRetry(t *testing.T) {
+	t.Parallel()
+	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := &sshagent.SelectionRequired{Source: "1Password", Identities: []sshagent.Identity{
+		{Fingerprint: "SHA256:work", Comment: "Work", Algorithm: "ssh-ed25519"},
+		{Fingerprint: "SHA256:personal", Comment: "Personal", Algorithm: "ssh-ed25519"},
+	}}
+	base := &fakeOperations{
+		listFn: func(context.Context, int) ([]catalog.Destination, error) { return spriteRows, nil },
+		prepareFn: func(context.Context, catalog.Destination, int) (catalog.PreparedAttach, error) {
+			return catalog.PreparedAttach{}, selection
+		},
+	}
+	operations := &fakeSSHKeyOperations{fakeOperations: base}
+	model := New(context.Background(), operations)
+	model, _ = runUpdate(t, model, runCmd(t, model.Init()))
+	model, prepareCmd := runUpdate(t, model, press("enter"))
+	model, cmd := runUpdate(t, model, runCmd(t, prepareCmd))
+	if cmd != nil || model.phase != phaseChoosingSSHKey {
+		t.Fatalf("selection phase/cmd = (%v, %v)", model.phase, cmd)
+	}
+	for _, want := range []string{"1Password", "Work", "Personal", "Only the selected public key"} {
+		if !strings.Contains(model.View().Content, want) {
+			t.Errorf("key picker does not contain %q: %q", want, model.View().Content)
+		}
+	}
+	model, _ = runUpdate(t, model, press("down"))
+	model, retryCmd := runUpdate(t, model, press("enter"))
+	if operations.selected != "SHA256:personal" || model.phase != phasePreparing || retryCmd == nil {
+		t.Fatalf("selection/retry = (%q, %v, %v)", operations.selected, model.phase, retryCmd)
 	}
 }
 

@@ -26,7 +26,7 @@ func TestCreateRequiresAKeyBeforeCallingSDK(t *testing.T) {
 	root, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	manager := sshagent.NewManager(root, "")
-	defer func() { _ = manager.Close() }()
+	_ = manager.Close()
 	client := &Client{agent: manager}
 	result := client.Create(context.Background(), "valid-name")
 	if !result.Rejected || !sshagent.KeyRequired(result.Err) {

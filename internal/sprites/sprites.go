@@ -286,6 +286,10 @@ func (c *Client) SSHAddCommand(ctx context.Context) (*exec.Cmd, error) {
 	return c.agent.SSHAddCommand(ctx)
 }
 
+func (c *Client) SelectSSHKey(fingerprint string) error {
+	return c.agent.Select(fingerprint)
+}
+
 func lifecycle(value string) State {
 	switch value {
 	case "running":
