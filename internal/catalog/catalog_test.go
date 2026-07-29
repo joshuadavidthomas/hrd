@@ -239,12 +239,15 @@ func TestSpriteDestinationsKeepObservedLifecycleAndSeparateIDs(t *testing.T) {
 
 func TestPrepareSpriteUsesExactRemoteURI(t *testing.T) {
 	t.Parallel()
-	prepared, err := catalog.PrepareSprite("alpha", sprites.Prepared{Port: 41234, Fingerprint: "SHA256:test"})
+	prepared, err := catalog.PrepareSprite("alpha", sprites.Prepared{Port: 41234, Fingerprint: "SHA256:test", SSHAuthSocket: "/tmp/hrd-agent.sock"})
 	if err != nil {
 		t.Fatalf("PrepareSprite() error = %v", err)
 	}
 	if got, want := prepared.HerdrArgs(), []string{"--remote", "ssh://sprite@127.0.0.1:41234"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+	if prepared.SSHAuthSocket() != "/tmp/hrd-agent.sock" {
+		t.Fatalf("SSH agent socket = %q", prepared.SSHAuthSocket())
 	}
 	if err := prepared.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)

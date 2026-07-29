@@ -13,6 +13,7 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
 	"github.com/joshuadavidthomas/hrd/internal/sprites"
+	"github.com/joshuadavidthomas/hrd/internal/sshagent"
 	"github.com/joshuadavidthomas/hrd/internal/ui"
 )
 
@@ -23,7 +24,7 @@ Usage:
 
 Sprite support:
   SPRITE_TOKEN  enable Sprite inventory, creation, and attach
-  ssh-agent     must hold at least one key for Sprite attach
+  ssh-agent     reused or started by hrd; ssh-add loads default identities
 
 Keys:
   ↑/↓, j/k  move
@@ -35,15 +36,17 @@ Keys:
   q         quit
 `
 
-func main() {
-	help, err := parseArgs(os.Args[1:])
+func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+
+func run(args []string, stdout, stderr *os.File) int {
+	help, err := parseArgs(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hrd: %v\nRun 'hrd --help' for usage.\n", err)
-		os.Exit(2)
+		_, _ = fmt.Fprintf(stderr, "hrd: %v\nRun 'hrd --help' for usage.\n", err)
+		return 2
 	}
 	if help {
-		_, _ = fmt.Fprint(os.Stdout, usageText)
-		return
+		_, _ = fmt.Fprint(stdout, usageText)
+		return 0
 	}
 
 	root, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -53,14 +56,17 @@ func main() {
 	var operations ui.Operations = catalog.NewLocalOperations(local)
 	token := os.Getenv("SPRITE_TOKEN")
 	_ = os.Unsetenv("SPRITE_TOKEN")
-	if spriteClient := sprites.New(root, token); spriteClient != nil {
-		operations = catalog.NewSpriteOperations(local, spriteClient)
+	if token != "" {
+		agentManager := sshagent.NewManager(root, os.Getenv("SSH_AUTH_SOCK"))
+		defer func() { _ = agentManager.Close() }()
+		operations = catalog.NewSpriteOperations(local, sprites.New(root, token, agentManager))
 	}
 	program := tea.NewProgram(ui.New(root, operations), tea.WithContext(root))
 	if _, err := program.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "hrd: %v\n", err)
-		os.Exit(1)
+		_, _ = fmt.Fprintf(stderr, "hrd: %v\n", err)
+		return 1
 	}
+	return 0
 }
 
 func parseArgs(args []string) (bool, error) {

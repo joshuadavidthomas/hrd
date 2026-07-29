@@ -16,6 +16,7 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
 	"github.com/joshuadavidthomas/hrd/internal/sprites"
+	"github.com/joshuadavidthomas/hrd/internal/sshagent"
 )
 
 type fakeOperations struct {
@@ -39,6 +40,18 @@ func (f *fakeOperations) Prepare(ctx context.Context, destination catalog.Destin
 		return catalog.Prepare(destination)
 	}
 	return f.prepareFn(ctx, destination, call)
+}
+
+type fakeSSHKeyOperations struct {
+	*fakeOperations
+	addCalls atomic.Int32
+	command  *exec.Cmd
+	err      error
+}
+
+func (f *fakeSSHKeyOperations) SSHAddCommand(context.Context) (*exec.Cmd, error) {
+	f.addCalls.Add(1)
+	return f.command, f.err
 }
 
 func TestInitialLoadProducesReadySelectableRows(t *testing.T) {
@@ -224,6 +237,43 @@ func TestPrepareExecutesExactHerdrArgsThenRefreshes(t *testing.T) {
 				t.Fatalf("post-attach phase/list calls = (%v, %d), want ready/2", model.phase, operations.listCalls.Load())
 			}
 		})
+	}
+}
+
+func TestSpriteHerdrChildReceivesManagedAgentSocket(t *testing.T) {
+	t.Setenv("SPRITE_TOKEN", "must-not-reach-herdr")
+	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := &fakeOperations{
+		listFn: func(context.Context, int) ([]catalog.Destination, error) { return spriteRows, nil },
+		prepareFn: func(context.Context, catalog.Destination, int) (catalog.PreparedAttach, error) {
+			return catalog.PrepareSprite("devbox", sprites.Prepared{Port: 41234, SSHAuthSocket: "/tmp/hrd-agent.sock"})
+		},
+	}
+	model := readyModel(t, operations)
+	var childEnvironment []string
+	model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
+		childEnvironment = append([]string(nil), command.Env...)
+		return func() tea.Msg { return callback(nil) }
+	}
+	model, prepareCmd := runUpdate(t, model, press("enter"))
+	_, execCmd := runUpdate(t, model, runCmd(t, prepareCmd))
+	if execCmd == nil {
+		t.Fatal("Sprite preparation did not hand off to Herdr")
+	}
+	found := false
+	for _, entry := range childEnvironment {
+		if entry == "SSH_AUTH_SOCK=/tmp/hrd-agent.sock" {
+			found = true
+		}
+		if strings.HasPrefix(entry, "SPRITE_TOKEN=") {
+			t.Fatalf("Herdr environment contains SPRITE_TOKEN: %#v", childEnvironment)
+		}
+	}
+	if !found {
+		t.Fatalf("Herdr environment lacks managed socket: %#v", childEnvironment)
 	}
 }
 
@@ -513,6 +563,54 @@ func TestHelpAndFilterKeysHaveTheirDocumentedActions(t *testing.T) {
 	visible := model.visibleDestinations()
 	if len(visible) != 1 || visible[0].Label != "alpha" {
 		t.Fatalf("filtered destinations = %#v, want alpha", visible)
+	}
+}
+
+func TestMissingAgentRunsSSHAddThenRetriesSpritePreparationOnce(t *testing.T) {
+	t.Parallel()
+	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &fakeOperations{
+		listFn: func(context.Context, int) ([]catalog.Destination, error) { return spriteRows, nil },
+		prepareFn: func(context.Context, catalog.Destination, int) (catalog.PreparedAttach, error) {
+			return catalog.PreparedAttach{}, sshagent.ErrNoKeys
+		},
+	}
+	operations := &fakeSSHKeyOperations{fakeOperations: base, command: exec.Command("ssh-add")}
+	model := New(context.Background(), operations)
+	model, _ = runUpdate(t, model, runCmd(t, model.Init()))
+
+	model, prepareCmd := runUpdate(t, model, press("enter"))
+	model, startAgentCmd := runUpdate(t, model, runCmd(t, prepareCmd))
+	if model.phase != phaseStartingSSHAgent || startAgentCmd == nil || !model.sshRecoveryAttempted {
+		t.Fatalf("agent recovery phase/cmd/attempted = (%v, %v, %v)", model.phase, startAgentCmd, model.sshRecoveryAttempted)
+	}
+
+	var sshAddArgs []string
+	model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
+		sshAddArgs = append([]string(nil), command.Args...)
+		return func() tea.Msg { return callback(nil) }
+	}
+	model, sshAddCmd := runUpdate(t, model, runCmd(t, startAgentCmd))
+	if model.phase != phaseAddingSSHKey || sshAddCmd == nil {
+		t.Fatalf("ssh-add handoff phase/cmd = (%v, %v)", model.phase, sshAddCmd)
+	}
+	if want := []string{"ssh-add"}; !reflect.DeepEqual(sshAddArgs, want) {
+		t.Fatalf("ssh-add args = %#v, want %#v", sshAddArgs, want)
+	}
+
+	model, retryPrepareCmd := runUpdate(t, model, runCmd(t, sshAddCmd))
+	if model.phase != phasePreparing || retryPrepareCmd == nil {
+		t.Fatalf("retry phase/cmd = (%v, %v)", model.phase, retryPrepareCmd)
+	}
+	model, refreshCmd := runUpdate(t, model, runCmd(t, retryPrepareCmd))
+	if model.phase != phaseRefreshing || refreshCmd == nil {
+		t.Fatalf("second key failure phase/cmd = (%v, %v), want one refresh", model.phase, refreshCmd)
+	}
+	if operations.addCalls.Load() != 1 || base.prepareCalls.Load() != 2 {
+		t.Fatalf("ssh-add/prepare calls = (%d, %d), want (1, 2)", operations.addCalls.Load(), base.prepareCalls.Load())
 	}
 }
 

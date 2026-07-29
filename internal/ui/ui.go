@@ -4,6 +4,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"unicode"
@@ -36,6 +37,9 @@ type spriteOperations interface {
 	Create(context.Context, string) spriteapi.CreateResult
 	PrepareSprite(context.Context, string) (catalog.PreparedAttach, error)
 }
+type sshKeyOperations interface {
+	SSHAddCommand(context.Context) (*exec.Cmd, error)
+}
 
 type phase uint8
 
@@ -49,6 +53,8 @@ const (
 	phaseNamingSprite
 	phaseCreatingSprite
 	phaseConfirmingHostKey
+	phaseStartingSSHAgent
+	phaseAddingSSHKey
 )
 
 type listDone struct {
@@ -72,6 +78,30 @@ type attachDone struct {
 type createDone struct {
 	opID   uint64
 	result spriteapi.CreateResult
+}
+type sshAddReady struct {
+	opID    uint64
+	command *exec.Cmd
+	err     error
+}
+type sshAddDone struct {
+	opID uint64
+	err  error
+}
+
+type pendingKind uint8
+
+const (
+	pendingNone pendingKind = iota
+	pendingCreate
+	pendingDestination
+	pendingCreatedSprite
+)
+
+type pendingOperation struct {
+	kind        pendingKind
+	name        string
+	destination catalog.Destination
 }
 
 type execProcessFunc func(*exec.Cmd, tea.ExecCallback) tea.Cmd
@@ -113,22 +143,24 @@ type Model struct {
 	operationStop context.CancelFunc
 	initialCmd    tea.Cmd
 
-	destinations        []catalog.Destination
-	selectedID          catalog.DestinationID
-	cursor              int
-	attachEnabled       bool
-	loadNotice          string
-	attachNotice        string
-	showHelp            bool
-	editingFilter       bool
-	quitting            bool
-	filter              string
-	filterBefore        string
-	spriteName          string
-	createBlock         string
-	prepared            catalog.PreparedAttach
-	spriteCreateEnabled bool
-	preparingSprite     bool
+	destinations         []catalog.Destination
+	selectedID           catalog.DestinationID
+	cursor               int
+	attachEnabled        bool
+	loadNotice           string
+	attachNotice         string
+	showHelp             bool
+	editingFilter        bool
+	quitting             bool
+	filter               string
+	filterBefore         string
+	spriteName           string
+	createBlock          string
+	prepared             catalog.PreparedAttach
+	spriteCreateEnabled  bool
+	preparingSprite      bool
+	pending              pendingOperation
+	sshRecoveryAttempted bool
 
 	width  int
 	height int
@@ -178,6 +210,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateAttachDone(msg)
 	case createDone:
 		return m.updateCreateDone(msg)
+	case sshAddReady:
+		return m.updateSSHAddReady(msg)
+	case sshAddDone:
+		return m.updateSSHAddDone(msg)
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	default:
@@ -186,7 +222,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.phase == phaseAttaching {
+	if m.phase == phaseAttaching || m.phase == phaseAddingSSHKey {
 		return m, nil
 	}
 	textEditing := m.editingFilter || m.phase == phaseNamingSprite
@@ -372,7 +408,13 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 	m.cancelOperation()
 	if msg.err != nil {
 		_ = msg.prepared.Close()
+		if catalog.NeedsSSHKey(msg.err) && !m.sshRecoveryAttempted {
+			return m, m.beginSSHKeyRecovery()
+		}
 		m.attachNotice = prepareFailureNotice(msg.err)
+		if catalog.NeedsSSHKey(msg.err) {
+			m.attachNotice = "ssh-add finished without loading a key. Add a key, then try again."
+		}
 		if m.preparingSprite {
 			m.phase = phaseRefreshing
 			return m, m.beginList()
@@ -415,12 +457,88 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 		return m, m.beginPrepareSprite(msg.result.Name)
 	}
 	if msg.result.Rejected {
+		if catalog.NeedsSSHKey(msg.result.Err) && !m.sshRecoveryAttempted {
+			return m, m.beginSSHKeyRecovery()
+		}
 		m.phase = phaseNamingSprite
-		m.attachNotice = "Create failed: " + msg.result.Err.Error()
+		if catalog.NeedsSSHKey(msg.result.Err) {
+			m.attachNotice = "ssh-add finished without loading a key. Add a key, then try again."
+		} else {
+			m.attachNotice = "Create failed: " + msg.result.Err.Error()
+		}
 		return m, nil
 	}
 	m.createBlock = msg.result.Name
 	m.attachNotice = "Creation outcome is unknown. Reconcile " + msg.result.Name + " before creating another Sprite."
+	m.phase = phaseRefreshing
+	return m, m.beginList()
+}
+
+func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
+	if m.phase != phaseStartingSSHAgent || msg.opID != m.operationID {
+		return m, nil
+	}
+	m.cancelOperation()
+	if msg.err != nil {
+		return m.sshKeySetupFailed(msg.err)
+	}
+	m.phase = phaseAddingSSHKey
+	opID := msg.opID
+	return m, m.execProcess(msg.command, func(err error) tea.Msg {
+		return sshAddDone{opID: opID, err: err}
+	})
+}
+
+func (m Model) updateSSHAddDone(msg sshAddDone) (tea.Model, tea.Cmd) {
+	if m.phase != phaseAddingSSHKey || msg.opID != m.operationID {
+		return m, nil
+	}
+	if msg.err != nil {
+		return m.sshKeySetupFailed(msg.err)
+	}
+	return m.retryPending()
+}
+
+func (m *Model) beginSSHKeyRecovery() tea.Cmd {
+	operations, ok := m.operations.(sshKeyOperations)
+	if !ok {
+		m.attachNotice = "Couldn’t start ssh-add."
+		return nil
+	}
+	m.sshRecoveryAttempted = true
+	m.attachNotice = ""
+	m.operationID = m.nextID()
+	ctx, cancel := context.WithCancel(m.root)
+	m.operationStop = cancel
+	m.phase = phaseStartingSSHAgent
+	opID := m.operationID
+	return func() tea.Msg {
+		command, err := operations.SSHAddCommand(ctx)
+		return sshAddReady{opID: opID, command: command, err: err}
+	}
+}
+
+func (m Model) retryPending() (tea.Model, tea.Cmd) {
+	switch m.pending.kind {
+	case pendingCreate:
+		return m, m.startCreate(m.pending.name)
+	case pendingDestination:
+		return m, m.startPrepare(m.pending.destination)
+	case pendingCreatedSprite:
+		return m, m.startPrepareSprite(m.pending.name)
+	default:
+		m.phase = phaseReady
+		m.attachNotice = "SSH key setup completed, but there is no pending Sprite operation."
+		return m, nil
+	}
+}
+
+func (m Model) sshKeySetupFailed(err error) (tea.Model, tea.Cmd) {
+	m.attachNotice = "ssh-add did not load a key: " + printable(err.Error())
+	if m.pending.kind == pendingCreate {
+		m.phase = phaseNamingSprite
+		return m, nil
+	}
 	m.phase = phaseRefreshing
 	return m, m.beginList()
 }
@@ -447,6 +565,12 @@ func (m *Model) beginList() tea.Cmd {
 }
 
 func (m *Model) beginCreate(name string) tea.Cmd {
+	m.pending = pendingOperation{kind: pendingCreate, name: name}
+	m.sshRecoveryAttempted = false
+	return m.startCreate(name)
+}
+
+func (m *Model) startCreate(name string) tea.Cmd {
 	operations, ok := m.operations.(spriteOperations)
 	if !ok {
 		return nil
@@ -459,6 +583,11 @@ func (m *Model) beginCreate(name string) tea.Cmd {
 	return func() tea.Msg { return createDone{opID: opID, result: operations.Create(ctx, name)} }
 }
 func (m *Model) beginPrepareSprite(name string) tea.Cmd {
+	m.pending = pendingOperation{kind: pendingCreatedSprite, name: name}
+	return m.startPrepareSprite(name)
+}
+
+func (m *Model) startPrepareSprite(name string) tea.Cmd {
 	operations, ok := m.operations.(spriteOperations)
 	if !ok {
 		return nil
@@ -477,13 +606,23 @@ func (m *Model) beginPrepareSprite(name string) tea.Cmd {
 }
 func (m *Model) beginAttach() tea.Cmd {
 	args := m.prepared.HerdrArgs()
-	command := exec.Command("herdr", append([]string(nil), args...)...)
+	command := exec.CommandContext(m.root, "herdr", append([]string(nil), args...)...)
+	if socket := m.prepared.SSHAuthSocket(); socket != "" {
+		environment := withoutEnvironment(os.Environ(), "SPRITE_TOKEN")
+		command.Env = withEnvironment(environment, "SSH_AUTH_SOCK", socket)
+	}
 	m.phase = phaseAttaching
 	opID := m.operationID
 	return m.execProcess(command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
 
 func (m *Model) beginPrepare(destination catalog.Destination) tea.Cmd {
+	m.pending = pendingOperation{kind: pendingDestination, destination: destination}
+	m.sshRecoveryAttempted = false
+	return m.startPrepare(destination)
+}
+
+func (m *Model) startPrepare(destination catalog.Destination) tea.Cmd {
 	m.operationID = m.nextID()
 	ctx, cancel := context.WithCancel(m.root)
 	m.operationStop = cancel
@@ -535,13 +674,17 @@ func (m Model) View() tea.View {
 	case phaseRefreshing:
 		content = m.snapshotView("Refreshing destinations…", "q quit")
 	case phasePreparing:
-		content = m.snapshotView("Preparing "+m.selectedLabel()+"…", "q cancel")
+		content = m.snapshotView("Preparing "+m.selectedLabel()+"…", "q quit")
 	case phaseNamingSprite:
 		content = m.nameView()
 	case phaseCreatingSprite:
-		content = m.simpleView("Creating "+m.spriteName+"…\nThis can take a moment.", "q cancel")
+		content = m.simpleView("Creating "+m.spriteName+"…\nThis can take a moment.", "q quit")
 	case phaseConfirmingHostKey:
 		content = m.hostKeyView()
+	case phaseStartingSSHAgent:
+		content = m.simpleView("Starting a private ssh-agent…", "q quit")
+	case phaseAddingSSHKey:
+		content = m.simpleView("ssh-add has the terminal.\nComplete its prompt to continue.", "")
 	case phaseAttaching:
 		content = m.simpleView("Herdr has the terminal.", "")
 	case phaseReady:
@@ -827,6 +970,28 @@ func prepareFailureNotice(err error) string {
 		return "SSH key required. Load a key with ssh-add, then try again."
 	}
 	return "Couldn’t prepare destination: " + message
+}
+
+func withoutEnvironment(environment []string, key string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+func withEnvironment(environment []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 func printable(text string) string {

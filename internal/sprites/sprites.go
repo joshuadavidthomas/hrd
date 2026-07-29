@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -53,17 +54,21 @@ type Client struct {
 	sdk     *sdk.Client
 	token   string
 	root    context.Context
+	agent   *sshagent.Manager
 	mu      sync.Mutex
 	closing bool
 	bridges map[*bridge]struct{}
 }
 
-func New(root context.Context, token string) *Client {
+func New(root context.Context, token string, agentManager *sshagent.Manager) *Client {
 	if token == "" {
 		return nil
 	}
+	if agentManager == nil {
+		panic("sprites: nil ssh-agent manager")
+	}
 	httpClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	c := &Client{sdk: sdk.New(token, sdk.WithHTTPClient(httpClient), sdk.WithDisableControl()), token: token, root: root, bridges: make(map[*bridge]struct{})}
+	c := &Client{sdk: sdk.New(token, sdk.WithHTTPClient(httpClient), sdk.WithDisableControl()), token: token, root: root, agent: agentManager, bridges: make(map[*bridge]struct{})}
 	go func() { <-root.Done(); c.closeAll() }()
 	return c
 }
@@ -111,7 +116,7 @@ func (c *Client) Create(ctx context.Context, name string) CreateResult {
 	if c == nil {
 		return CreateResult{Name: name, Rejected: true, Err: errors.New("Sprite access is disabled")}
 	}
-	credentials, err := sshagent.Load(ctx)
+	credentials, err := c.agent.Load(ctx)
 	if err != nil {
 		return CreateResult{Name: name, Rejected: true, Err: err}
 	}
@@ -135,9 +140,10 @@ func (c *Client) Create(ctx context.Context, name string) CreateResult {
 }
 
 type Prepared struct {
-	Port        int
-	Fingerprint string
-	close       func() error
+	Port          int
+	Fingerprint   string
+	SSHAuthSocket string
+	close         func() error
 }
 
 func (p Prepared) Close() error {
@@ -156,7 +162,7 @@ func (c *Client) Prepare(ctx context.Context, name string) (Prepared, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, prepareTimeout)
 	defer cancel()
-	credentials, err := sshagent.Load(ctx)
+	credentials, err := c.agent.Load(ctx)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -168,7 +174,12 @@ func (c *Client) Prepare(ctx context.Context, name string) (Prepared, error) {
 	if err != nil {
 		return Prepared{}, err
 	}
-	return c.openBridge(name, fingerprint)
+	prepared, err := c.openBridge(name, fingerprint)
+	if err != nil {
+		return Prepared{}, err
+	}
+	prepared.SSHAuthSocket = c.agent.Socket()
+	return prepared, nil
 }
 
 func (c *Client) provision(ctx context.Context, name, keys string) error {
@@ -268,6 +279,12 @@ func (c *Client) probe(ctx context.Context, name string, credentials *sshagent.C
 	return fingerprint, nil
 }
 func terminalPage(hasMore bool, token string) bool { return !hasMore || token == "" }
+
+// SSHAddCommand starts an hrd-owned agent when needed and returns plain
+// ssh-add with the selected socket in its explicit environment.
+func (c *Client) SSHAddCommand(ctx context.Context) (*exec.Cmd, error) {
+	return c.agent.SSHAddCommand(ctx)
+}
 
 func lifecycle(value string) State {
 	switch value {

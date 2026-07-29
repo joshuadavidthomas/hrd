@@ -1,6 +1,11 @@
 package sprites
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/joshuadavidthomas/hrd/internal/sshagent"
+)
 
 func TestValidName(t *testing.T) {
 	t.Parallel()
@@ -13,6 +18,19 @@ func TestValidName(t *testing.T) {
 		if err := ValidName(name); err == nil {
 			t.Errorf("ValidName(%q) succeeded", name)
 		}
+	}
+}
+
+func TestCreateRequiresAKeyBeforeCallingSDK(t *testing.T) {
+	t.Parallel()
+	root, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := sshagent.NewManager(root, "")
+	defer func() { _ = manager.Close() }()
+	client := &Client{agent: manager}
+	result := client.Create(context.Background(), "valid-name")
+	if !result.Rejected || !sshagent.KeyRequired(result.Err) {
+		t.Fatalf("Create() result = %#v, want key-required rejection", result)
 	}
 }
 

@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os/exec"
 	"sort"
 	"sync"
 
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
 	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
+	"github.com/joshuadavidthomas/hrd/internal/sshagent"
 )
 
 // DestinationID identifies both the endpoint and session of a destination.
@@ -60,9 +62,10 @@ type Destination struct {
 // PreparedAttach contains the arguments for the fixed herdr executable.
 // HerdrArgs returns a copy so a caller cannot mutate stored preparation state.
 type PreparedAttach struct {
-	herdrArgs   []string
-	Fingerprint string
-	close       *attachCloseState
+	herdrArgs     []string
+	sshAuthSocket string
+	Fingerprint   string
+	close         *attachCloseState
 }
 type attachCloseState struct {
 	once sync.Once
@@ -82,6 +85,10 @@ func (p PreparedAttach) Close() error {
 func (p PreparedAttach) HerdrArgs() []string {
 	return append([]string(nil), p.herdrArgs...)
 }
+
+// SSHAuthSocket returns the explicit agent socket for a Sprite Herdr child.
+// Local attachments return an empty string and inherit the caller environment.
+func (p PreparedAttach) SSHAuthSocket() string { return p.sshAuthSocket }
 
 var (
 	// ErrInvalidDestination means source data or a selected destination broke a
@@ -205,7 +212,7 @@ func PrepareSprite(name string, prepared spriteapi.Prepared) (PreparedAttach, er
 		return PreparedAttach{}, fmt.Errorf("%w: invalid Sprite preparation", ErrInvalidDestination)
 	}
 	target := (&url.URL{Scheme: "ssh", User: url.User("sprite"), Host: fmt.Sprintf("127.0.0.1:%d", prepared.Port)}).String()
-	return PreparedAttach{herdrArgs: []string{"--remote", target}, Fingerprint: prepared.Fingerprint, close: &attachCloseState{fn: prepared.Close}}, nil
+	return PreparedAttach{herdrArgs: []string{"--remote", target}, sshAuthSocket: prepared.SSHAuthSocket, Fingerprint: prepared.Fingerprint, close: &attachCloseState{fn: prepared.Close}}, nil
 }
 
 type SpriteOperations struct {
@@ -273,6 +280,14 @@ func (o *SpriteOperations) Prepare(ctx context.Context, destination Destination)
 func (o *SpriteOperations) Create(ctx context.Context, name string) spriteapi.CreateResult {
 	return o.sprites.Create(ctx, name)
 }
+
+func (o *SpriteOperations) SSHAddCommand(ctx context.Context) (*exec.Cmd, error) {
+	return o.sprites.SSHAddCommand(ctx)
+}
+
+// NeedsSSHKey reports the one pre-effect failure that hrd can repair with
+// plain ssh-add before retrying the pending operation.
+func NeedsSSHKey(err error) bool { return sshagent.KeyRequired(err) }
 func (o *SpriteOperations) PrepareSprite(ctx context.Context, name string) (PreparedAttach, error) {
 	prepared, err := o.sprites.Prepare(ctx, name)
 	if err != nil {
