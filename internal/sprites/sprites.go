@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -27,7 +28,10 @@ const (
 	prepareTimeout = 3 * time.Minute
 )
 
-var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var (
+	namePattern             = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	spriteHostKeyAlgorithms = []string{ssh.KeyAlgoED25519}
+)
 
 type State string
 
@@ -235,6 +239,9 @@ func (c *Client) provision(ctx context.Context, name, keys string) error {
 	defer func() { _ = stream.Close() }()
 	for {
 		event, err := stream.Next()
+		if errors.Is(err, io.EOF) {
+			return c.waitForServiceRunning(ctx, name)
+		}
 		if err != nil {
 			return safeError("wait for hrd-sshd", err)
 		}
@@ -243,8 +250,34 @@ func (c *Client) provision(ctx context.Context, name, keys string) error {
 			return nil
 		case "stdout", "stderr":
 			continue
+		case "", "complete":
+			return c.waitForServiceRunning(ctx, name)
 		default:
 			return fmt.Errorf("hrd-sshd did not start: %s", event.Type)
+		}
+	}
+}
+
+func (c *Client) waitForServiceRunning(ctx context.Context, name string) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		service, err := c.sdk.GetService(ctx, name, "hrd-sshd")
+		if err != nil {
+			return safeError("check hrd-sshd", err)
+		}
+		if service.State != nil {
+			switch service.State.Status {
+			case "running":
+				return nil
+			case "failed":
+				return errors.New("hrd-sshd failed to start")
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }
@@ -263,7 +296,7 @@ func (c *Client) probe(ctx context.Context, name string, credentials *sshagent.C
 		return "", err
 	}
 	var fingerprint string
-	config := &ssh.ClientConfig{User: "sprite", Auth: []ssh.AuthMethod{ssh.PublicKeys(credentials.Signers...)}, HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+	config := &ssh.ClientConfig{User: "sprite", Auth: []ssh.AuthMethod{ssh.PublicKeys(credentials.Signers...)}, HostKeyAlgorithms: append([]string(nil), spriteHostKeyAlgorithms...), HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		fingerprint = ssh.FingerprintSHA256(key)
 		return nil
 	}}
