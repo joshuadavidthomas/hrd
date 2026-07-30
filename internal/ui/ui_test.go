@@ -187,7 +187,7 @@ func TestWideReadyViewUsesCenteredContentHeightSections(t *testing.T) {
 	if leading := len(lines[first]) - len(strings.TrimLeft(lines[first], " ")); leading < 20 {
 		t.Fatalf("content starts at column %d, want horizontal centering: %q", leading, lines[first])
 	}
-	for _, want := range []string{"Local sessions", "Sprites", "checked just now"} {
+	for _, want := range []string{"Local sessions", "Sprites"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("grouped view lacks %q: %q", want, plain)
 		}
@@ -305,6 +305,7 @@ func TestRefreshToastDoesNotMoveCenteredContent(t *testing.T) {
 	}
 	baseRow, baseColumn := position(model.View().Content, "hrd  / Sessions & Sprites")
 	model.inventoryRefreshing = true
+	model.inventoryRefreshVisible = true
 	refreshing := model.View().Content
 	toastRow, toastColumn := position(refreshing, "hrd  / Sessions & Sprites")
 	if baseRow != toastRow || baseColumn != toastColumn {
@@ -351,7 +352,7 @@ func TestPartialSourceFailureRetainsStaleRowsAndDisablesTheirActions(t *testing.
 		t.Fatalf("selection was not retained: %q", selected(t, model).Label)
 	}
 	content := model.View().Content
-	for _, want := range []string{"devbox", "stale", "provider unavailable", "checked"} {
+	for _, want := range []string{"devbox", "stale", "provider unavailable", "refresh failed"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("stale view lacks %q: %q", want, content)
 		}
@@ -405,22 +406,86 @@ func TestTotalInitialFailureRetriesToReady(t *testing.T) {
 	}
 }
 
-func TestClockTickAdvancesObservationAgeWithoutRefreshingInventory(t *testing.T) {
-	observed := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	now := observed
+func TestBackgroundRefreshIsSilentAndUpdatesInventory(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
-	model := New(context.Background(), ops)
-	model.now = func() time.Time { return now }
-	model, _ = update(t, model, run(t, model.initialCmd))
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		state := sprites.Running
+		if call > 1 {
+			state = sprites.Cold
+		}
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", state)}}
+	}
+	model := ready(t, ops)
 	oldID := model.operationID
 
-	now = observed.Add(3 * time.Second)
-	model, nextTick := update(t, model, clockTick(now))
-	if nextTick == nil || model.inventoryRefreshing || model.operationID != oldID || ops.inventoryCalls.Load() != 1 {
-		t.Fatalf("clock tick refreshed inventory = cmd %v refreshing %v id %d→%d calls %d", nextTick, model.inventoryRefreshing, oldID, model.operationID, ops.inventoryCalls.Load())
+	model, refresh := update(t, model, refreshTick(time.Now()))
+	if refresh == nil || !model.inventoryRefreshing || model.inventoryRefreshVisible || model.operationID <= oldID {
+		t.Fatalf("background refresh = cmd %v refreshing %v visible %v id %d→%d", refresh, model.inventoryRefreshing, model.inventoryRefreshVisible, oldID, model.operationID)
 	}
-	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "checked 3s ago") {
-		t.Fatalf("clock tick did not advance observation age: %q", view)
+	view := ansi.Strip(model.View().Content)
+	if strings.Contains(view, "Refreshing") || strings.Contains(view, "checked") || strings.Contains(view, "ago") {
+		t.Fatalf("background refresh exposed progress or a timer: %q", view)
+	}
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.inventoryRefreshing || ops.inventoryCalls.Load() != 2 {
+		t.Fatalf("background refresh completion = refreshing %v calls %d", model.inventoryRefreshing, ops.inventoryCalls.Load())
+	}
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "cold") || strings.Contains(view, "checked") || strings.Contains(view, "ago") {
+		t.Fatalf("background refresh did not quietly update lifecycle: %q", view)
+	}
+}
+
+func TestBackgroundRefreshFailureUsesPanelStateWithoutToast(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		if call > 1 {
+			return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Err: errors.New("provider unavailable")}}
+		}
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Running)}}
+	}
+	model := ready(t, ops)
+	model, refresh := update(t, model, refreshTick(time.Now()))
+	model, _ = update(t, model, runFirst(t, refresh))
+	view := ansi.Strip(model.View().Content)
+	if model.spriteSnapshot.current || !strings.Contains(view, "stale") || !strings.Contains(view, "refresh failed") {
+		t.Fatalf("silent failure did not mark panel stale: current %v view %q", model.spriteSnapshot.current, view)
+	}
+	if strings.Contains(view, "provider unavailable") || strings.Contains(view, "Refreshing") {
+		t.Fatalf("silent failure rendered a toast: %q", view)
+	}
+}
+
+func TestNamingSupersedesBackgroundRefresh(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := ready(t, ops)
+	model, _ = update(t, model, refreshTick(time.Now()))
+	refreshID := model.operationID
+
+	model, _ = update(t, model, press("n"))
+	model, _ = update(t, model, press("x"))
+	if model.phase != phaseNamingSprite || model.nameInput.Value() != "x" || model.inventoryRefreshing || model.operationID <= refreshID {
+		t.Fatalf("naming did not supersede refresh = phase %v value %q refreshing %v id %d→%d", model.phase, model.nameInput.Value(), model.inventoryRefreshing, refreshID, model.operationID)
+	}
+	model, cmd := update(t, model, inventoryDone{opID: refreshID, inventory: catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Cold)}}})
+	if cmd != nil || model.phase != phaseNamingSprite || model.nameInput.Value() != "x" {
+		t.Fatalf("late background refresh closed naming: phase %v value %q cmd %v", model.phase, model.nameInput.Value(), cmd)
+	}
+}
+
+func TestFilterOpenBeforeBackgroundRefreshSurvivesCompletion(t *testing.T) {
+	ops := &fakeOperations{}
+	model := ready(t, ops)
+	model, _ = update(t, model, press("/"))
+	for _, letter := range "alp" {
+		model, _ = update(t, model, press(string(letter)))
+	}
+	model, refresh := update(t, model, refreshTick(time.Now()))
+	if refresh == nil || !model.inventoryRefreshing || model.inventoryRefreshVisible {
+		t.Fatalf("filter blocked silent refresh = cmd %v refreshing %v visible %v", refresh, model.inventoryRefreshing, model.inventoryRefreshVisible)
+	}
+	model, _ = update(t, model, runFirst(t, refresh))
+	if !model.browser.SettingFilter() || model.browser.FilterValue() != "alp" || len(model.browser.VisibleItems()) != 1 {
+		t.Fatalf("filter after background refresh = setting %v query %q items %d", model.browser.SettingFilter(), model.browser.FilterValue(), len(model.browser.VisibleItems()))
 	}
 }
 
@@ -894,28 +959,19 @@ func TestAttachFailureNoticeSurvivesAutomaticRefresh(t *testing.T) {
 	}
 }
 
-func TestSpriteDetailShowsLiveObservationAgeWithoutPolling(t *testing.T) {
+func TestBackgroundInventoryRefreshDoesNotPollSpriteDetail(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
-	observed := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	now := observed
-	model := ready(t, ops)
-	model.now = func() time.Time { return now }
-	model.browser.Select(2)
-	model, load := update(t, model, press("enter"))
-	model, _ = update(t, model, runFirst(t, load))
-	if content := model.View().Content; !strings.Contains(content, "Herdr checked just now") {
-		t.Fatalf("initial detail observation line = %q", content)
-	}
+	model := spriteReady(t, ops)
+	inventoryCalls := ops.inventoryCalls.Load()
+	sessionCalls := ops.listSpriteCalls.Load()
 
-	calls := ops.listSpriteCalls.Load()
-	now = observed.Add(65 * time.Second)
-	model, cmd := update(t, model, clockTick(now))
-	if cmd == nil || model.phase != phaseReady || model.inventoryRefreshing || ops.listSpriteCalls.Load() != calls {
-		t.Fatalf("detail clock tick polled = phase %v refreshing %v calls %d→%d cmd %v", model.phase, model.inventoryRefreshing, calls, ops.listSpriteCalls.Load(), cmd)
+	model, cmd := update(t, model, refreshTick(time.Now()))
+	if cmd == nil || model.phase != phaseReady || model.inventoryRefreshing || ops.inventoryCalls.Load() != inventoryCalls || ops.listSpriteCalls.Load() != sessionCalls {
+		t.Fatalf("detail refresh tick polled = phase %v refreshing %v inventory %d→%d sessions %d→%d cmd %v", model.phase, model.inventoryRefreshing, inventoryCalls, ops.inventoryCalls.Load(), sessionCalls, ops.listSpriteCalls.Load(), cmd)
 	}
-	content := model.View().Content
-	if strings.Count(content, "Herdr checked") != 1 || !strings.Contains(content, "Herdr checked 1m ago") {
-		t.Fatalf("live detail observation line = %q", content)
+	content := ansi.Strip(model.View().Content)
+	if strings.Contains(content, "checked") || strings.Contains(content, "ago") {
+		t.Fatalf("Sprite detail shows an observation timer: %q", content)
 	}
 }
 
@@ -1074,6 +1130,9 @@ func TestConfirmedAndRejectedCreateOutcomes(t *testing.T) {
 		model.nameInput.SetValue("newbox")
 		model, create := update(t, model, press("enter"))
 		model, refresh := update(t, model, runFirst(t, create))
+		if !model.inventoryRefreshing || model.inventoryRefreshVisible || strings.Contains(ansi.Strip(model.View().Content), "Refreshing") {
+			t.Fatalf("confirmed create reconciliation was visible: refreshing %v visible %v view %q", model.inventoryRefreshing, model.inventoryRefreshVisible, model.View().Content)
+		}
 		model, _ = update(t, model, runFirst(t, refresh))
 		if selected(t, model).Label != "newbox" || model.createBlock != "" {
 			t.Fatalf("confirmed create selection/block = %q/%q", selected(t, model).Label, model.createBlock)
@@ -1116,12 +1175,12 @@ func TestUnknownCreateOutcomeBlocksFurtherCreationUntilInventoryReconciles(t *te
 	model.nameInput.SetValue("newbox")
 	model, create := update(t, model, press("enter"))
 	model, refresh := update(t, model, runFirst(t, create))
-	if model.createBlock != "newbox" || model.phase != phaseReady || !model.inventoryRefreshing || refresh == nil {
-		t.Fatalf("unknown outcome block/phase/refreshing/cmd = %q/%v/%v/%v", model.createBlock, model.phase, model.inventoryRefreshing, refresh)
+	if model.createBlock != "newbox" || model.phase != phaseReady || !model.inventoryRefreshing || model.inventoryRefreshVisible || refresh == nil {
+		t.Fatalf("unknown outcome block/phase/refreshing/visible/cmd = %q/%v/%v/%v/%v", model.createBlock, model.phase, model.inventoryRefreshing, model.inventoryRefreshVisible, refresh)
 	}
 	model, _ = update(t, model, runFirst(t, refresh))
-	if !strings.Contains(model.View().Content, "outcome is unknown") || !strings.Contains(model.View().Content, "cannot reconcile") {
-		t.Fatalf("unknown notice did not survive failed reconciliation: %q", model.View().Content)
+	if !strings.Contains(model.View().Content, "outcome is unknown") || !strings.Contains(model.View().Content, "refresh failed") || strings.Contains(model.View().Content, "cannot reconcile") {
+		t.Fatalf("silent reconciliation feedback = %q", model.View().Content)
 	}
 	model, cmd := update(t, model, press("n"))
 	if cmd != nil || model.phase != phaseReady || ops.createCalls.Load() != 1 {

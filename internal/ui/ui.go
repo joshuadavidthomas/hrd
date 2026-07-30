@@ -28,7 +28,7 @@ import (
 const (
 	defaultWidth            = 80
 	defaultHeight           = 24
-	clockInterval           = time.Second
+	refreshInterval         = 10 * time.Second
 	minBrowserPanelWidth    = 60
 	maxBrowserPanelWidth    = 82
 	maxSurfaceWidth         = 104
@@ -89,10 +89,9 @@ const (
 )
 
 type sourceSnapshot struct {
-	rows       []catalog.Destination
-	loaded     bool
-	current    bool
-	observedAt time.Time
+	rows    []catalog.Destination
+	loaded  bool
+	current bool
 }
 
 type browserItem struct {
@@ -222,7 +221,7 @@ type sshAddDone struct {
 	err  error
 }
 
-type clockTick time.Time
+type refreshTick time.Time
 
 type prepareOperation struct {
 	destination catalog.Destination
@@ -269,25 +268,24 @@ type Model struct {
 	spriteDetailEndpointID  catalog.DestinationID
 	spriteSnapshotDetail    sourceSnapshot
 
-	notice               string
-	createNotice         string
-	refreshNotice        string
-	inventoryRefreshing  bool
-	createBlock          string
-	showHelp             bool
-	restart              bool
-	restartStopSucceeded bool
-	confirmDest          catalog.Destination
-	activePrepare        prepareOperation
-	prepared             catalog.PreparedAttach
+	notice                  string
+	createNotice            string
+	refreshNotice           string
+	inventoryRefreshing     bool
+	inventoryRefreshVisible bool
+	createBlock             string
+	showHelp                bool
+	restart                 bool
+	restartStopSucceeded    bool
+	confirmDest             catalog.Destination
+	activePrepare           prepareOperation
+	prepared                catalog.PreparedAttach
 
 	transport        catalog.SpriteTransport
 	sshRecoveryTried bool
 	sshKeySource     string
 	sshKeyChoices    []catalog.SSHIdentity
 	sshKeyCursor     int
-
-	now func() time.Time
 }
 
 // New creates a model and schedules the first inventory read.
@@ -340,19 +338,18 @@ func New(root context.Context, operations Operations) Model {
 		spinner:     spin,
 		help:        helpModel,
 		nameInput:   name,
-		now:         time.Now,
 	}
 	m.initialCmd = m.beginInventory()
 	return m
 }
 
-// Init starts inventory loading, animation, and the observation-age clock.
+// Init starts inventory loading, animation, and silent background refresh.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.initialCmd, m.spinner.Tick, scheduleClock())
+	return tea.Batch(m.initialCmd, m.spinner.Tick, scheduleRefresh())
 }
 
-func scheduleClock() tea.Cmd {
-	return tea.Tick(clockInterval, func(t time.Time) tea.Msg { return clockTick(t) })
+func scheduleRefresh() tea.Cmd {
+	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg { return refreshTick(t) })
 }
 
 // Update advances navigation and provider effects.
@@ -377,8 +374,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
-	case clockTick:
-		return m, scheduleClock()
+	case refreshTick:
+		cmds := make([]tea.Cmd, 0, 2)
+		if m.screen == screenEndpoints && m.phase == phaseReady && !m.inventoryRefreshing {
+			cmds = append(cmds, m.beginSilentInventory())
+		}
+		cmds = append(cmds, scheduleRefresh())
+		return m, tea.Batch(cmds...)
 	case inventoryDone:
 		return m.updateInventoryDone(msg)
 	case spriteSessionsDone:
@@ -470,7 +472,8 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if m.inventoryRefreshing {
-			return m, nil
+			m.inventoryRefreshVisible = true
+			return m, m.spinner.Tick
 		}
 		cmd := m.beginInventory()
 		return m, tea.Batch(cmd, m.spinner.Tick)
@@ -498,6 +501,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.screen == screenEndpoints && msg.String() == "n" && !m.browser.SettingFilter() {
 		if _, ok := m.operations.(spriteOperations); ok && m.spriteSnapshot.current && m.createBlock == "" {
+			m.startOperation()
 			m.nameInput.Reset()
 			m.nameInput.SetValue("")
 			m.nameInput.Focus()
@@ -636,13 +640,16 @@ func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	wasInitial := m.phase == phaseLoading
+	showFeedback := wasInitial || m.inventoryRefreshVisible
 	m.cancelOperation()
 	m.inventoryRefreshing = false
-	now := m.now()
-	m.localSnapshot = refreshSnapshot(m.localSnapshot, msg.inventory.Local, now)
-	m.spriteSnapshot = refreshSnapshot(m.spriteSnapshot, msg.inventory.Sprites, now)
+	m.inventoryRefreshVisible = false
+	m.localSnapshot = refreshSnapshot(m.localSnapshot, msg.inventory.Local)
+	m.spriteSnapshot = refreshSnapshot(m.spriteSnapshot, msg.inventory.Sprites)
 	m.destinations = append(append([]catalog.Destination(nil), m.localSnapshot.rows...), m.spriteSnapshot.rows...)
-	m.refreshNotice = inventoryNotice(msg.inventory, wasInitial)
+	if showFeedback {
+		m.refreshNotice = inventoryNotice(msg.inventory, wasInitial)
+	}
 	if wasInitial && !m.localSnapshot.loaded && !m.spriteSnapshot.loaded {
 		m.phase = phaseInitialLoadFailed
 		if m.refreshNotice == "" {
@@ -666,7 +673,7 @@ func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func refreshSnapshot(previous sourceSnapshot, result catalog.SourceResult, now time.Time) sourceSnapshot {
+func refreshSnapshot(previous sourceSnapshot, result catalog.SourceResult) sourceSnapshot {
 	if result.Skipped {
 		return sourceSnapshot{}
 	}
@@ -674,7 +681,7 @@ func refreshSnapshot(previous sourceSnapshot, result catalog.SourceResult, now t
 		previous.current = false
 		return previous
 	}
-	return sourceSnapshot{rows: append([]catalog.Destination(nil), result.Rows...), loaded: true, current: true, observedAt: now}
+	return sourceSnapshot{rows: append([]catalog.Destination(nil), result.Rows...), loaded: true, current: true}
 }
 
 func inventoryNotice(inventory catalog.Inventory, initial bool) string {
@@ -709,7 +716,7 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 		m.spriteSnapshotDetail.current = false
 		m.refreshNotice = "Sprite session refresh failed: " + printable(msg.err.Error())
 	} else {
-		m.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), msg.rows...), loaded: true, current: true, observedAt: m.now()}
+		m.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), msg.rows...), loaded: true, current: true}
 		m.refreshNotice = ""
 	}
 	m.phase = phaseReady
@@ -770,8 +777,7 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 	if result.Confirmed && spriteapi.ValidName(result.Name) == nil {
 		m.selectSprite = result.Name
 		m.phase = phaseReady
-		cmd := m.beginInventory()
-		return m, tea.Batch(cmd, m.spinner.Tick)
+		return m, m.beginSilentInventory()
 	}
 	if result.Rejected {
 		m.phase = phaseNamingSprite
@@ -786,8 +792,7 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 	m.createBlock = result.Name
 	m.createNotice = "Creation outcome is unknown. Reconcile " + printable(result.Name) + " before creating another Sprite."
 	m.phase = phaseReady
-	cmd := m.beginInventory()
-	return m, tea.Batch(cmd, m.spinner.Tick)
+	return m, m.beginSilentInventory()
 }
 
 func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
@@ -885,8 +890,7 @@ func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	m.phase = phaseReady
-	cmd := m.beginInventory()
-	return m, tea.Batch(cmd, m.spinner.Tick)
+	return m, m.beginSilentInventory()
 }
 
 func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
@@ -957,13 +961,22 @@ func (m *Model) returnToEndpoints() tea.Cmd {
 	if !m.spriteSnapshot.loaded || m.spriteSnapshot.current {
 		return nil
 	}
-	return tea.Batch(m.beginInventory(), m.spinner.Tick)
+	return m.beginSilentInventory()
 }
 
 func (m *Model) beginInventory() tea.Cmd {
+	return m.beginInventoryWithFeedback(true)
+}
+
+func (m *Model) beginSilentInventory() tea.Cmd {
+	return m.beginInventoryWithFeedback(false)
+}
+
+func (m *Model) beginInventoryWithFeedback(visible bool) tea.Cmd {
 	m.startOperation()
 	if m.phase != phaseLoading {
 		m.inventoryRefreshing = true
+		m.inventoryRefreshVisible = visible
 	}
 	opID := m.operationID
 	ctx := m.operationContext()
@@ -1142,6 +1155,7 @@ func (m *Model) invalidateSpriteAttachObservations() {
 func (m *Model) startOperation() {
 	m.cancelOperation()
 	m.inventoryRefreshing = false
+	m.inventoryRefreshVisible = false
 	m.operationID = m.nextID()
 }
 
@@ -1310,23 +1324,6 @@ func (m Model) endpointBrowserItem(destination catalog.Destination, stale bool) 
 	return item
 }
 
-func age(now, observed time.Time) string {
-	if observed.IsZero() {
-		return "never"
-	}
-	d := now.Sub(observed)
-	if d < 0 || d < time.Second {
-		return "just now"
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%ds ago", int(d/time.Second))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm ago", int(d/time.Minute))
-	}
-	return fmt.Sprintf("%dh ago", int(d/time.Hour))
-}
-
 func (m *Model) reconcileCreateBlock() {
 	if m.createBlock == "" || !m.spriteSnapshot.current {
 		return
@@ -1341,7 +1338,7 @@ func (m *Model) reconcileCreateBlock() {
 }
 
 func (m Model) busy() bool {
-	if m.inventoryRefreshing {
+	if m.inventoryRefreshing && m.inventoryRefreshVisible {
 		return true
 	}
 	switch m.phase {
@@ -1507,7 +1504,7 @@ func (m Model) toastView() string {
 		notices = append(notices, style.Render("! "+printable(notice)))
 	}
 	progress := ""
-	if m.inventoryRefreshing {
+	if m.inventoryRefreshing && m.inventoryRefreshVisible {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing local and Sprite inventory…")
 	} else if m.phase == phaseRefreshingSprite {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing "+m.spriteName()+" sessions…")
@@ -1651,20 +1648,20 @@ func (m Model) listView(width, height int) string {
 		parts = append(parts, centerPanel(lipgloss.NewStyle().Width(panelWidth).Render(clip(filter, panelWidth))))
 	}
 	if m.screen == screenSprite {
-		badge := "Herdr checked " + age(m.now(), m.spriteSnapshotDetail.observedAt) + " · " + fmt.Sprintf("%d", len(m.spriteSnapshotDetail.rows))
+		badge := fmt.Sprintf("%d", len(m.spriteSnapshotDetail.rows))
 		parts = append(parts, centerPanel(renderBrowserPanel(m.spriteName()+" sessions", badge, renderEntries(sessions), panelWidth, "No Herdr sessions found.")))
 	} else {
 		if len(local) > 0 || (m.browser.FilterState() == list.Unfiltered && m.localSnapshot.loaded) {
 			badge := fmt.Sprintf("%d", len(m.localSnapshot.rows))
 			if !m.localSnapshot.current {
-				badge = "refresh failed · checked " + age(m.now(), m.localSnapshot.observedAt)
+				badge = "refresh failed · " + badge
 			}
 			parts = append(parts, centerPanel(renderBrowserPanel("Local sessions", badge, renderEntries(local), panelWidth, "No local sessions.")))
 		}
 		if len(sprites) > 0 || (m.browser.FilterState() == list.Unfiltered && m.spriteSnapshot.loaded) {
-			badge := "checked " + age(m.now(), m.spriteSnapshot.observedAt) + " · " + fmt.Sprintf("%d", len(m.spriteSnapshot.rows))
+			badge := fmt.Sprintf("%d", len(m.spriteSnapshot.rows))
 			if !m.spriteSnapshot.current {
-				badge = "refresh failed · checked " + age(m.now(), m.spriteSnapshot.observedAt)
+				badge = "refresh failed · " + badge
 			}
 			parts = append(parts, centerPanel(renderBrowserPanel("Sprites", badge, renderEntries(sprites), panelWidth, "No Sprites.")))
 		}
