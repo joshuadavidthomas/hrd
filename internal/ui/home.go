@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
@@ -44,6 +45,69 @@ func scheduleRefresh() tea.Cmd {
 }
 
 // Update advances navigation and provider effects.
+func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch m.home.phase {
+	case phaseNamingSprite:
+		return m.updateName(msg)
+	case phaseInitialLoadFailed:
+		if key.Matches(msg, m.keys.refresh) {
+			m.setPhase(phaseLoading)
+			m.refreshNotice = ""
+			return m, m.beginInventory()
+		}
+		return m, nil
+	case phaseLoading, phaseCreatingSprite:
+		return m, nil
+	case phaseReady:
+	default:
+		panic("ui: invalid Home phase")
+	}
+
+	if key.Matches(msg, m.keys.refresh) && !m.browser.SettingFilter() {
+		m.refreshNotice = ""
+		if m.home.inventoryRefreshing {
+			m.home.inventoryRefreshVisible = true
+			return m, m.spinner.Tick
+		}
+		return m, tea.Batch(m.beginInventory(), m.spinner.Tick)
+	}
+	if msg.String() == "n" && !m.browser.SettingFilter() {
+		if _, ok := m.operations.(spriteOperations); ok && m.home.spriteSnapshot.current && m.home.createBlock == "" {
+			m.supersedeOperation()
+			m.nameInput.Reset()
+			m.nameInput.SetValue("")
+			m.nameInput.Focus()
+			m.notice = ""
+			m.setPhase(phaseNamingSprite)
+		}
+		return m, nil
+	}
+	if msg.String() == "enter" && !m.browser.SettingFilter() {
+		destination, ok := m.selectedDestination()
+		if !ok || !m.selectedCurrent() {
+			return m, nil
+		}
+		m.notice = ""
+		m.selectedID = destination.ID
+		m.home.endpointSelection = destination.ID
+		if _, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok {
+			selection, err := catalog.SelectSpriteEndpoint(destination)
+			if err != nil {
+				m.notice = prepareFailureNotice(err)
+				return m, nil
+			}
+			m.sessions.open(destination, selection)
+			m.home.invalidateSprites()
+			m.setPhase(phaseLoadingSprite)
+			m.browser.ResetFilter()
+			m.browser.SetItems(nil)
+			return m, tea.Batch(m.beginSpriteSessions(), m.spinner.Tick)
+		}
+		return m, tea.Batch(m.beginPrepareLocal(destination), m.spinner.Tick)
+	}
+	return m.updateBrowserKey(msg)
+}
+
 func (m Model) updateName(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":

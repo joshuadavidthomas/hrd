@@ -207,6 +207,21 @@ func (m Model) endpointBrowserItem(destination catalog.Destination, stale bool) 
 	return item
 }
 
+func (m Model) updateBrowserKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	filterState := m.browser.FilterState()
+	filterValue := m.browser.FilterValue()
+	var cmd tea.Cmd
+	m.browser, cmd = m.browser.Update(msg)
+	m.refreshBrowserFilter(filterState, filterValue)
+	if destination, ok := m.selectedDestination(); ok {
+		m.selectedID = destination.ID
+		if m.active == workflowHome {
+			m.home.endpointSelection = destination.ID
+		}
+	}
+	return m, cmd
+}
+
 func (m *Model) resizeComponents() {
 	surfaceWidth := m.surfaceWidth()
 	m.browser.SetWidth(surfaceWidth)

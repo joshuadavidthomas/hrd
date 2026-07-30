@@ -48,13 +48,6 @@ type spriteOperations interface {
 	SelectSSHKey(string) error
 }
 
-type screen uint8
-
-const (
-	screenEndpoints screen = iota + 1
-	screenSprite
-)
-
 type workflow uint8
 
 const (
@@ -133,7 +126,6 @@ type Model struct {
 	execCommand func(tea.ExecCommand, tea.ExecCallback) tea.Cmd
 	keys        keyMap
 
-	screen screen
 	active workflow
 	width  int
 	height int
@@ -200,7 +192,6 @@ func New(root context.Context, operations Operations) Model {
 		execProcess: tea.ExecProcess,
 		execCommand: tea.Exec,
 		keys:        newKeyMap(),
-		screen:      screenEndpoints,
 		active:      workflowHome,
 		width:       defaultWidth,
 		height:      defaultHeight,
@@ -217,6 +208,25 @@ func New(root context.Context, operations Operations) Model {
 // Init starts inventory loading and silent background refresh.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.initialCmd, scheduleRefresh())
+}
+
+func (m Model) showsSprite() bool {
+	switch m.active {
+	case workflowHome:
+		return false
+	case workflowSessions:
+		return true
+	case workflowConnection:
+		switch m.connection.phase {
+		case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport:
+			_, ok := m.connection.destination.Endpoint.(catalog.SpriteEndpoint)
+			return ok
+		default:
+			return m.connection.prepare.sprite
+		}
+	default:
+		panic("ui: invalid active workflow")
+	}
 }
 
 func (m Model) currentPhase() phase {
@@ -245,7 +255,7 @@ func (m *Model) setPhase(next phase) {
 		m.active = workflowConnection
 		m.connection.phase = next
 	case phaseReady:
-		if m.screen == screenSprite {
+		if m.showsSprite() {
 			m.active = workflowSessions
 			m.sessions.phase = next
 		} else {
@@ -280,7 +290,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case refreshTick:
 		cmds := make([]tea.Cmd, 0, 2)
-		if m.screen == screenEndpoints && m.currentPhase() == phaseReady && !m.home.inventoryRefreshing {
+		if m.active == workflowHome && m.currentPhase() == phaseReady && !m.home.inventoryRefreshing {
 			cmds = append(cmds, m.beginSilentInventory())
 		}
 		cmds = append(cmds, scheduleRefresh())
@@ -319,152 +329,27 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	}
-
-	switch m.currentPhase() {
-	case phaseNamingSprite:
-		return m.updateName(msg)
-	case phaseChoosingSpriteTransport:
-		return m.updateTransport(msg)
-	case phaseConfirmingSpriteInstall:
-		return m.updateSpriteInstallConfirmation(msg)
-	case phaseConfirmingStop:
-		return m.updateStopConfirmation(msg)
-	case phaseConfirmingHostKey:
-		if msg.String() == "enter" || msg.String() == "y" {
-			cmd := m.beginAttach()
-			return m, cmd
-		}
-		if msg.String() == "esc" || msg.String() == "n" {
-			closePrepared(m.connection.prepared)
-			m.connection.prepared = nil
-			m.connection.restartStopped = false
-			cmd := m.beginSpriteRefresh()
-			return m, cmd
-		}
-		return m, nil
-	case phaseChoosingSSHKey:
-		return m.updateSSHKeyChoice(msg)
-	case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
-		if msg.String() == "esc" {
-			return m, m.returnToEndpoints()
-		}
-		return m, nil
-	case phaseInitialLoadFailed:
-		if key.Matches(msg, m.keys.refresh) {
-			m.setPhase(phaseLoading)
-			m.refreshNotice = ""
-			cmd := m.beginInventory()
-			return m, cmd
-		}
-		return m, nil
-	case phaseAddingSSHKey, phaseAttaching:
-		return m, nil
-	}
-
-	if m.currentPhase() != phaseReady {
-		return m, nil
-	}
-	if key.Matches(msg, m.keys.help) && !m.browser.SettingFilter() {
+	if m.currentPhase() == phaseReady && key.Matches(msg, m.keys.help) && !m.browser.SettingFilter() {
 		m.showHelp = !m.showHelp
 		m.help.ShowAll = m.showHelp
 		return m, nil
 	}
-	if key.Matches(msg, m.keys.refresh) && !m.browser.SettingFilter() {
-		m.refreshNotice = ""
-		if m.screen == screenSprite {
-			cmd := m.beginSpriteRefresh()
-			return m, cmd
-		}
-		if m.home.inventoryRefreshing {
-			m.home.inventoryRefreshVisible = true
-			return m, m.spinner.Tick
-		}
-		cmd := m.beginInventory()
-		return m, tea.Batch(cmd, m.spinner.Tick)
-	}
-	if m.screen == screenSprite && !m.browser.SettingFilter() {
-		if key.Matches(msg, m.keys.back) {
-			return m, m.returnToEndpoints()
-		}
-		if key.Matches(msg, m.keys.stop) {
-			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
-				m.connection.destination = destination
-				m.connection.restart = false
-				m.setPhase(phaseConfirmingStop)
-			}
-			return m, nil
-		}
-		if key.Matches(msg, m.keys.restart) {
-			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
-				m.connection.destination = destination
-				m.connection.restart = true
-				m.setPhase(phaseConfirmingStop)
-			}
-			return m, nil
-		}
-	}
-	if m.screen == screenEndpoints && msg.String() == "n" && !m.browser.SettingFilter() {
-		if _, ok := m.operations.(spriteOperations); ok && m.home.spriteSnapshot.current && m.home.createBlock == "" {
-			m.supersedeOperation()
-			m.nameInput.Reset()
-			m.nameInput.SetValue("")
-			m.nameInput.Focus()
-			m.notice = ""
-			m.setPhase(phaseNamingSprite)
-		}
-		return m, nil
-	}
-	if msg.String() == "enter" && !m.browser.SettingFilter() {
-		destination, ok := m.selectedDestination()
-		if !ok || !m.selectedCurrent() {
-			return m, nil
-		}
-		m.notice = ""
-		m.selectedID = destination.ID
-		if m.screen == screenEndpoints {
-			m.home.endpointSelection = destination.ID
-			if _, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok {
-				selection, err := catalog.SelectSpriteEndpoint(destination)
-				if err != nil {
-					m.notice = prepareFailureNotice(err)
-					return m, nil
-				}
-				m.sessions.open(destination, selection)
-				m.home.invalidateSprites()
-				m.screen = screenSprite
-				m.setPhase(phaseLoadingSprite)
-				m.browser.ResetFilter()
-				m.browser.SetItems(nil)
-				cmd := m.beginSpriteSessions()
-				return m, tea.Batch(cmd, m.spinner.Tick)
-			}
-			cmd := m.beginPrepareLocal(destination)
-			return m, tea.Batch(cmd, m.spinner.Tick)
-		}
-		m.connection.destination = destination
-		m.connection.restart = false
-		m.connection.transport = catalog.NativePreview
-		m.setPhase(phaseChoosingSpriteTransport)
-		return m, nil
-	}
 
-	filterState := m.browser.FilterState()
-	filterValue := m.browser.FilterValue()
-	var cmd tea.Cmd
-	m.browser, cmd = m.browser.Update(msg)
-	m.refreshBrowserFilter(filterState, filterValue)
-	if destination, ok := m.selectedDestination(); ok {
-		m.selectedID = destination.ID
-		if m.screen == screenEndpoints {
-			m.home.endpointSelection = destination.ID
-		}
+	switch m.active {
+	case workflowHome:
+		return m.updateHomeKey(msg)
+	case workflowSessions:
+		return m.updateSessionsKey(msg)
+	case workflowConnection:
+		return m.updateConnectionKey(msg)
+	default:
+		panic("ui: invalid active workflow")
 	}
-	return m, cmd
 }
 
 func (m *Model) returnToEndpoints() tea.Cmd {
-	m.screen = screenEndpoints
-	m.setPhase(phaseReady)
+	m.active = workflowHome
+	m.home.phase = phaseReady
 	m.browser.ResetFilter()
 	m.syncEndpointItems(m.home.endpointSelection)
 	if !m.home.spriteSnapshot.loaded || m.home.spriteSnapshot.current {

@@ -102,7 +102,7 @@ func (m Model) breadcrumbView() string {
 
 func (m Model) breadcrumbSegments() []string {
 	segments := make([]string, 0, 2)
-	if m.screen == screenSprite {
+	if m.showsSprite() {
 		segments = append(segments, m.spriteName())
 	}
 
@@ -187,7 +187,7 @@ func (m Model) bodyView(width, height int) string {
 		}
 		return "Herdr has the terminal."
 	case phaseReady:
-		if m.screen == screenSprite {
+		if m.showsSprite() {
 			return m.listView(width, height)
 		}
 		if len(m.browser.Items()) == 0 {
@@ -271,7 +271,7 @@ func (m Model) listView(width, height int) string {
 	visible := m.browser.VisibleItems()
 	selected := m.browser.Index()
 	panelCount := 1
-	if m.screen == screenEndpoints {
+	if !m.showsSprite() {
 		panelCount = 0
 		hasLocal := m.browser.FilterState() == list.Unfiltered && m.home.localSnapshot.loaded
 		hasSprites := m.browser.FilterState() == list.Unfiltered && m.home.spriteSnapshot.loaded
@@ -334,7 +334,7 @@ func (m Model) listView(width, height int) string {
 		case catalog.LocalEndpoint:
 			local = append(local, entry)
 		case catalog.SpriteEndpoint:
-			if m.screen == screenSprite {
+			if m.showsSprite() {
 				sessions = append(sessions, entry)
 			} else {
 				sprites = append(sprites, entry)
@@ -353,7 +353,7 @@ func (m Model) listView(width, height int) string {
 	if filter != "" {
 		parts = append(parts, centerPanel(lipgloss.NewStyle().Width(panelWidth).Render(clip(filter, panelWidth))))
 	}
-	if m.screen == screenSprite {
+	if m.showsSprite() {
 		badge := fmt.Sprintf("%d", len(m.sessions.spriteSnapshotDetail.rows))
 		parts = append(parts, centerPanel(renderBrowserPanel(m.spriteName()+" sessions", badge, renderEntries(sessions), panelWidth, "No Herdr sessions found.")))
 	} else {
@@ -570,7 +570,7 @@ func (m Model) helpView() string {
 	case phaseReady:
 		if m.browser.SettingFilter() {
 			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
-		} else if m.screen == screenSprite {
+		} else if m.showsSprite() {
 			actions := make([]key.Binding, 0, 3)
 			if _, ok := m.selectedDestination(); ok && m.selectedCurrent() {
 				actions = append(actions, m.keys.enter)
@@ -630,7 +630,7 @@ func (m Model) browserPanelWidth(available int) int {
 			browserMarkerWidth + browserStatusGap + browserStatusWidth + browserPanelChrome
 		ideal = max(ideal, rowWidth)
 	}
-	if m.screen == screenSprite {
+	if m.showsSprite() {
 		title := m.spriteName() + " sessions"
 		badge := fmt.Sprintf("%d", len(m.sessions.spriteSnapshotDetail.rows))
 		ideal = max(ideal, lipgloss.Width(title)+lipgloss.Width(badge)+9)

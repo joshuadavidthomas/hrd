@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
@@ -37,6 +38,61 @@ type spriteSessionsDone struct {
 type installSpriteHerdrDone struct {
 	opID uint64
 	err  error
+}
+
+func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch m.sessions.phase {
+	case phaseConfirmingSpriteInstall:
+		return m.updateSpriteInstallConfirmation(msg)
+	case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
+		if msg.String() == "esc" {
+			return m, m.returnToEndpoints()
+		}
+		return m, nil
+	case phaseReady:
+	default:
+		panic("ui: invalid Sprite Sessions phase")
+	}
+
+	if key.Matches(msg, m.keys.refresh) && !m.browser.SettingFilter() {
+		m.refreshNotice = ""
+		return m, m.beginSpriteRefresh()
+	}
+	if !m.browser.SettingFilter() {
+		if key.Matches(msg, m.keys.back) {
+			return m, m.returnToEndpoints()
+		}
+		if key.Matches(msg, m.keys.stop) {
+			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
+				m.connection.destination = destination
+				m.connection.restart = false
+				m.setPhase(phaseConfirmingStop)
+			}
+			return m, nil
+		}
+		if key.Matches(msg, m.keys.restart) {
+			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
+				m.connection.destination = destination
+				m.connection.restart = true
+				m.setPhase(phaseConfirmingStop)
+			}
+			return m, nil
+		}
+		if msg.String() == "enter" {
+			destination, ok := m.selectedDestination()
+			if !ok || !m.selectedCurrent() {
+				return m, nil
+			}
+			m.notice = ""
+			m.selectedID = destination.ID
+			m.connection.destination = destination
+			m.connection.restart = false
+			m.connection.transport = catalog.NativePreview
+			m.setPhase(phaseChoosingSpriteTransport)
+			return m, nil
+		}
+	}
+	return m.updateBrowserKey(msg)
 }
 
 func (m Model) updateSpriteInstallConfirmation(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

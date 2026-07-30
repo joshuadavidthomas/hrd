@@ -418,7 +418,7 @@ func TestPartialSourceFailureRetainsStaleRowsAndDisablesTheirActions(t *testing.
 		}
 	}
 	unchanged, cmd := update(t, model, press("enter"))
-	if cmd != nil || unchanged.screen != screenEndpoints || ops.listSpriteCalls.Load() != 0 {
+	if cmd != nil || unchanged.active != workflowHome || ops.listSpriteCalls.Load() != 0 {
 		t.Fatal("stale Sprite endpoint started a state-sensitive effect")
 	}
 }
@@ -627,8 +627,8 @@ func TestNavigationBetweenEndpointAndSpriteScreensResetsFilter(t *testing.T) {
 	model, _ = update(t, model, runFirst(t, load))
 	model.browser.SetFilterText("work")
 	model, reconcile := update(t, model, press("esc"))
-	if model.screen != screenEndpoints || model.browser.FilterValue() != "" || model.browser.SettingFilter() || reconcile == nil {
-		t.Fatalf("Sprite filter survived back navigation = screen %v setting %v query %q cmd %v", model.screen, model.browser.SettingFilter(), model.browser.FilterValue(), reconcile)
+	if model.active != workflowHome || model.browser.FilterValue() != "" || model.browser.SettingFilter() || reconcile == nil {
+		t.Fatalf("Sprite filter survived back navigation = screen %v setting %v query %q cmd %v", model.active, model.browser.SettingFilter(), model.browser.FilterValue(), reconcile)
 	}
 	model, _ = update(t, model, runFirst(t, reconcile))
 }
@@ -653,8 +653,8 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 	model := ready(t, ops)
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
-	if model.screen != screenSprite || model.currentPhase() != phaseLoadingSprite || load == nil || ops.listSpriteCalls.Load() != 0 {
-		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.currentPhase(), model.screen, ops.listSpriteCalls.Load(), load)
+	if model.active != workflowSessions || model.currentPhase() != phaseLoadingSprite || load == nil || ops.listSpriteCalls.Load() != 0 {
+		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.currentPhase(), model.active, ops.listSpriteCalls.Load(), load)
 	}
 	loadingView := ansi.Strip(model.View().Content)
 	for _, want := range []string{"devbox sessions", "Loading sessions", ansi.Strip(model.spinner.View())} {
@@ -703,8 +703,8 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 		}
 	}
 	model, cmd := update(t, model, press("n"))
-	if cmd == nil || model.screen != screenEndpoints || model.currentPhase() != phaseReady || ops.installCalls.Load() != 0 {
-		t.Fatalf("install rejection = screen %v phase %v calls %d cmd %v", model.screen, model.currentPhase(), ops.installCalls.Load(), cmd)
+	if cmd == nil || model.active != workflowHome || model.currentPhase() != phaseReady || ops.installCalls.Load() != 0 {
+		t.Fatalf("install rejection = screen %v phase %v calls %d cmd %v", model.active, model.currentPhase(), ops.installCalls.Load(), cmd)
 	}
 	model, _ = update(t, model, runFirst(t, cmd))
 
@@ -1437,8 +1437,8 @@ func spriteReady(t *testing.T, operations Operations) Model {
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
 	model, _ = update(t, model, runFirst(t, load))
-	if model.screen != screenSprite || model.currentPhase() != phaseReady {
-		t.Fatalf("Sprite detail phase/screen = %v/%v", model.currentPhase(), model.screen)
+	if model.active != workflowSessions || model.currentPhase() != phaseReady {
+		t.Fatalf("Sprite detail phase/screen = %v/%v", model.currentPhase(), model.active)
 	}
 	return model
 }

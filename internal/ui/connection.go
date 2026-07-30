@@ -59,6 +59,32 @@ type connectionState struct {
 }
 
 // Model is hrd's Bubble Tea model.
+func (m Model) updateConnectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch m.connection.phase {
+	case phaseChoosingSpriteTransport:
+		return m.updateTransport(msg)
+	case phaseConfirmingStop:
+		return m.updateStopConfirmation(msg)
+	case phaseConfirmingHostKey:
+		if msg.String() == "enter" || msg.String() == "y" {
+			return m, m.beginAttach()
+		}
+		if msg.String() == "esc" || msg.String() == "n" {
+			closePrepared(m.connection.prepared)
+			m.connection.prepared = nil
+			m.connection.restartStopped = false
+			return m, m.beginSpriteRefresh()
+		}
+		return m, nil
+	case phaseChoosingSSHKey:
+		return m.updateSSHKeyChoice(msg)
+	case phaseStopping, phasePreparing, phaseStartingSSHAgent, phaseAddingSSHKey, phaseAttaching:
+		return m, nil
+	default:
+		panic("ui: invalid Connection phase")
+	}
+}
+
 func (m Model) updateTransport(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "down", "j", "k":
