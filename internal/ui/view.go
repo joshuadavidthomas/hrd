@@ -108,12 +108,12 @@ func (m Model) breadcrumbSegments() []string {
 
 	switch m.phase {
 	case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport:
-		if m.confirmDest.Label != "" {
-			segments = append(segments, printable(m.confirmDest.Label))
+		if m.connection.destination.Label != "" {
+			segments = append(segments, printable(m.connection.destination.Label))
 		}
 	case phasePreparing, phaseConfirmingHostKey, phaseStartingSSHAgent, phaseAddingSSHKey, phaseChoosingSSHKey, phaseAttaching:
-		if m.activePrepare.destination.Label != "" {
-			segments = append(segments, printable(m.activePrepare.destination.Label))
+		if m.connection.prepare.destination.Label != "" {
+			segments = append(segments, printable(m.connection.prepare.destination.Label))
 		}
 	}
 	return segments
@@ -144,31 +144,31 @@ func (m Model) bodyView(width, height int) string {
 		return m.listView(width, height)
 	case phaseConfirmingStop:
 		action := "Stop"
-		if m.restart {
+		if m.connection.restart {
 			action = "Restart"
 		}
 		return fitView(strings.Join([]string{
-			titleStyle.Render(action + " " + printable(m.confirmDest.Label) + "?"),
+			titleStyle.Render(action + " " + printable(m.connection.destination.Label) + "?"),
 			warningStyle.Render("Pane processes in this session will exit."),
 		}, "\n"), width, height)
 	case phaseStopping:
 		action := "Stopping "
-		if m.restart {
+		if m.connection.restart {
 			action = "Stopping before restart: "
 		}
-		return m.listWithWork(action+printable(m.confirmDest.Label)+"…", width, height)
+		return m.listWithWork(action+printable(m.connection.destination.Label)+"…", width, height)
 	case phaseChoosingSpriteTransport:
 		return fitView(m.transportView(width), width, height)
 	case phasePreparing:
-		if m.activePrepare.sprite {
-			if m.activePrepare.transport == catalog.SSHFallback {
+		if m.connection.prepare.sprite {
+			if m.connection.prepare.transport == catalog.SSHFallback {
 				return m.busyLine("Setting up SSH on "+m.spriteName()+"… Up to three minutes.", width)
 			}
 			return fitView(m.transportView(width), width, height)
 		}
-		return m.busyLine("Preparing local session "+printable(m.activePrepare.destination.Label)+"…", width)
+		return m.busyLine("Preparing local session "+printable(m.connection.prepare.destination.Label)+"…", width)
 	case phaseConfirmingHostKey:
-		prepared, _ := m.prepared.(catalog.PreparedProcessAttach)
+		prepared, _ := m.connection.prepared.(catalog.PreparedProcessAttach)
 		return fitView(strings.Join([]string{
 			titleStyle.Render("Verify SSH host key"),
 			"Authenticated through the Sprites API:",
@@ -182,7 +182,7 @@ func (m Model) bodyView(width, height int) string {
 	case phaseChoosingSSHKey:
 		return fitView(m.sshKeyView(width), width, height)
 	case phaseAttaching:
-		if m.activePrepare.sprite && m.activePrepare.transport == catalog.NativePreview {
+		if m.connection.prepare.sprite && m.connection.prepare.transport == catalog.NativePreview {
 			return m.listView(width, height)
 		}
 		return "Herdr has the terminal."
@@ -447,13 +447,13 @@ func (m Model) transportView(width int) string {
 		if index > 0 {
 			rows = append(rows, borderStyle.Render("├"+strings.Repeat("─", chooserWidth-2)+"┤"))
 		}
-		rows = append(rows, renderTransportOption(option.title, option.badge, option.detail, option.transport == m.transport, chooserWidth))
+		rows = append(rows, renderTransportOption(option.title, option.badge, option.detail, option.transport == m.connection.transport, chooserWidth))
 	}
 	panel := borderStyle.Render("╭"+strings.Repeat("─", chooserWidth-2)+"╮") + "\n" +
 		strings.Join(rows, "\n") + "\n" +
 		borderStyle.Render("╰"+strings.Repeat("─", chooserWidth-2)+"╯")
 	heading := "Choose a connection"
-	if m.restart {
+	if m.connection.restart {
 		heading = "Choose a connection for the restarted session"
 	}
 	parts := []string{
@@ -462,7 +462,7 @@ func (m Model) transportView(width int) string {
 		"",
 		panel,
 	}
-	if m.phase == phasePreparing && m.transport == catalog.NativePreview {
+	if m.phase == phasePreparing && m.connection.transport == catalog.NativePreview {
 		parts = append(parts, "", m.busyLine("Preparing native connection…", chooserWidth))
 	}
 	content := strings.Join(parts, "\n")
@@ -500,13 +500,13 @@ func renderTransportOption(title, badge, detail string, selected bool, width int
 }
 
 func (m Model) sshKeyView(width int) string {
-	source := m.sshKeySource
+	source := m.connection.sshKeySource
 	if source == "" {
 		source = "ssh-agent"
 	}
-	lines := []string{fmt.Sprintf("%s exposes %d keys. Choose exactly one.", printable(source), len(m.sshKeyChoices))}
-	for index, choice := range m.sshKeyChoices {
-		selected := index == m.sshKeyCursor
+	lines := []string{fmt.Sprintf("%s exposes %d keys. Choose exactly one.", printable(source), len(m.connection.sshKeyChoices))}
+	for index, choice := range m.connection.sshKeyChoices {
+		selected := index == m.connection.sshKeyCursor
 		marker := "  "
 		markerStyle := lipgloss.NewStyle()
 		labelStyle := lipgloss.NewStyle()
@@ -528,8 +528,8 @@ func (m Model) sshKeyView(width int) string {
 			mutedStyle.Width(algorithmWidth).Render(clip(algorithm, algorithmWidth))
 		lines = append(lines, row)
 	}
-	if m.sshKeyCursor >= 0 && m.sshKeyCursor < len(m.sshKeyChoices) {
-		lines = append(lines, mutedStyle.Render("Fingerprint ")+accentStyle.Render(printable(m.sshKeyChoices[m.sshKeyCursor].Fingerprint)))
+	if m.connection.sshKeyCursor >= 0 && m.connection.sshKeyCursor < len(m.connection.sshKeyChoices) {
+		lines = append(lines, mutedStyle.Render("Fingerprint ")+accentStyle.Render(printable(m.connection.sshKeyChoices[m.connection.sshKeyCursor].Fingerprint)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -609,7 +609,7 @@ func (m Model) spriteName() string {
 	if endpoint, ok := m.spriteEndpoint.Endpoint.(catalog.SpriteEndpoint); ok {
 		return printable(endpoint.Name)
 	}
-	if endpoint, ok := m.activePrepare.destination.Endpoint.(catalog.SpriteEndpoint); ok {
+	if endpoint, ok := m.connection.prepare.destination.Endpoint.(catalog.SpriteEndpoint); ok {
 		return printable(endpoint.Name)
 	}
 	return "Sprite"

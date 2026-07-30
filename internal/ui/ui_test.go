@@ -65,6 +65,11 @@ type fakeSpriteOperations struct {
 	prepareSpriteFn    func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error)
 	preparedSelection  catalog.SpriteSessionSelection
 	preparedTransport  catalog.SpriteTransport
+	addCalls           atomic.Int32
+	addCommand         *exec.Cmd
+	addErr             error
+	selected           string
+	selectErr          error
 }
 
 func (f *fakeSpriteOperations) Inventory(ctx context.Context) catalog.Inventory {
@@ -116,20 +121,11 @@ func (f *fakeSpriteOperations) PrepareSprite(ctx context.Context, selection cata
 	return nil, errors.New("unexpected Sprite preparation")
 }
 
-type fakeSSHOperations struct {
-	*fakeSpriteOperations
-	addCalls   atomic.Int32
-	addCommand *exec.Cmd
-	addErr     error
-	selected   string
-	selectErr  error
-}
-
-func (f *fakeSSHOperations) SSHAddCommand(context.Context) (*exec.Cmd, error) {
+func (f *fakeSpriteOperations) SSHAddCommand(context.Context) (*exec.Cmd, error) {
 	f.addCalls.Add(1)
 	return f.addCommand, f.addErr
 }
-func (f *fakeSSHOperations) SelectSSHKey(fingerprint string) error {
+func (f *fakeSpriteOperations) SelectSSHKey(fingerprint string) error {
 	f.selected = fingerprint
 	return f.selectErr
 }
@@ -834,7 +830,7 @@ func TestSelectableRowsShareArrowWithoutBackground(t *testing.T) {
 	}
 	browserRow := renderBrowserRow(item, true, 48)
 	transportRow := renderTransportOption("Native", "recommended", "Herdr runs inside the Sprite.", true, 48)
-	sshModel := Model{sshKeyChoices: []catalog.SSHIdentity{{Comment: "Work key", Algorithm: "ssh-ed25519"}}, sshKeyCursor: 0}
+	sshModel := Model{connection: connectionState{sshKeyChoices: []catalog.SSHIdentity{{Comment: "Work key", Algorithm: "ssh-ed25519"}}, sshKeyCursor: 0}}
 	sshRows := sshModel.sshKeyView(48)
 	for name, rendered := range map[string]string{"browser": browserRow, "transport": transportRow, "SSH": sshRows} {
 		if strings.Contains(rendered, "48;5;") {
@@ -1004,8 +1000,8 @@ func TestStopConfirmationAndRestartComposeStopThenAttach(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	model := spriteReady(t, ops)
 	model, cmd := update(t, model, press("s"))
-	if cmd != nil || model.phase != phaseConfirmingStop || model.restart {
-		t.Fatalf("stop confirmation = phase %v restart %v cmd %v", model.phase, model.restart, cmd)
+	if cmd != nil || model.phase != phaseConfirmingStop || model.connection.restart {
+		t.Fatalf("stop confirmation = phase %v restart %v cmd %v", model.phase, model.connection.restart, cmd)
 	}
 	if !strings.Contains(model.View().Content, "Pane processes in this session will exit") {
 		t.Fatalf("confirmation lacks process warning: %q", model.View().Content)
@@ -1201,8 +1197,8 @@ func TestHostKeyRequiresExplicitConfirmationAndCancelDropsPrepared(t *testing.T)
 		t.Fatalf("host confirmation = phase %v calls %d cmd %v view %q", model.phase, execCalls, cmd, model.View().Content)
 	}
 	model, refresh := update(t, model, press("esc"))
-	if model.prepared != nil || model.phase != phaseRefreshingSprite || refresh == nil {
-		t.Fatalf("cancel cleanup = prepared %v phase %v cmd %v", model.prepared, model.phase, refresh)
+	if model.connection.prepared != nil || model.phase != phaseRefreshingSprite || refresh == nil {
+		t.Fatalf("cancel cleanup = prepared %v phase %v cmd %v", model.connection.prepared, model.phase, refresh)
 	}
 }
 
@@ -1215,7 +1211,7 @@ func TestSSHKeySelectionUsesExactlyOneKeyAndRetries(t *testing.T) {
 	base.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
 		return nil, selection
 	}
-	ops := &fakeSSHOperations{fakeSpriteOperations: base}
+	ops := base
 	model := spriteReady(t, ops)
 	model, _ = update(t, model, press("enter"))
 	model, _ = update(t, model, press("down"))
@@ -1236,14 +1232,15 @@ func TestSSHAddRecoveryRunsOnce(t *testing.T) {
 	base.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
 		return nil, sshagent.ErrNoKeys
 	}
-	ops := &fakeSSHOperations{fakeSpriteOperations: base, addCommand: exec.Command("ssh-add")}
+	base.addCommand = exec.Command("ssh-add")
+	ops := base
 	model := spriteReady(t, ops)
 	model, _ = update(t, model, press("enter"))
 	model, _ = update(t, model, press("down"))
 	model, prepare := update(t, model, press("enter"))
 	model, start := update(t, model, runFirst(t, prepare))
-	if model.phase != phaseStartingSSHAgent || start == nil || !model.sshRecoveryTried {
-		t.Fatalf("recovery start = phase %v cmd %v tried %v", model.phase, start, model.sshRecoveryTried)
+	if model.phase != phaseStartingSSHAgent || start == nil || !model.connection.sshRecoveryTried {
+		t.Fatalf("recovery start = phase %v cmd %v tried %v", model.phase, start, model.connection.sshRecoveryTried)
 	}
 	model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
 		if !reflect.DeepEqual(command.Args, []string{"ssh-add"}) {
@@ -1363,7 +1360,7 @@ func TestQuitCancelsEffectAndRejectsLatePreparedCompletion(t *testing.T) {
 	select {
 	case completion := <-done:
 		model, late := update(t, model, completion)
-		if late != nil || !model.quitting || model.prepared != nil {
+		if late != nil || !model.quitting || model.connection.prepared != nil {
 			t.Fatal("late prepared completion survived quit cleanup")
 		}
 	case <-time.After(time.Second):
