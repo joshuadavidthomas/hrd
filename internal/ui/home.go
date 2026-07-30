@@ -10,6 +10,22 @@ import (
 	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
+type homeState struct {
+	localSnapshot           sourceSnapshot
+	spriteSnapshot          sourceSnapshot
+	destinations            []catalog.Destination
+	endpointSelection       catalog.DestinationID
+	selectSprite            string
+	createNotice            string
+	inventoryRefreshing     bool
+	inventoryRefreshVisible bool
+	createBlock             string
+}
+
+func (s *homeState) invalidateSprites() {
+	s.spriteSnapshot.current = false
+}
+
 type inventoryDone struct {
 	opID      uint64
 	inventory catalog.Inventory
@@ -49,21 +65,21 @@ func (m Model) updateName(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || (m.phase != phaseLoading && !m.inventoryRefreshing) {
+	if msg.opID != m.operation.id || (m.phase != phaseLoading && !m.home.inventoryRefreshing) {
 		return m, nil
 	}
 	wasInitial := m.phase == phaseLoading
-	showFeedback := wasInitial || m.inventoryRefreshVisible
+	showFeedback := wasInitial || m.home.inventoryRefreshVisible
 	m.cancelOperation()
-	m.inventoryRefreshing = false
-	m.inventoryRefreshVisible = false
-	m.localSnapshot = refreshSnapshot(m.localSnapshot, msg.inventory.Local)
-	m.spriteSnapshot = refreshSnapshot(m.spriteSnapshot, msg.inventory.Sprites)
-	m.destinations = append(append([]catalog.Destination(nil), m.localSnapshot.rows...), m.spriteSnapshot.rows...)
+	m.home.inventoryRefreshing = false
+	m.home.inventoryRefreshVisible = false
+	m.home.localSnapshot = refreshSnapshot(m.home.localSnapshot, msg.inventory.Local)
+	m.home.spriteSnapshot = refreshSnapshot(m.home.spriteSnapshot, msg.inventory.Sprites)
+	m.home.destinations = append(append([]catalog.Destination(nil), m.home.localSnapshot.rows...), m.home.spriteSnapshot.rows...)
 	if showFeedback {
 		m.refreshNotice = inventoryNotice(msg.inventory, wasInitial)
 	}
-	if wasInitial && !m.localSnapshot.loaded && !m.spriteSnapshot.loaded {
+	if wasInitial && !m.home.localSnapshot.loaded && !m.home.spriteSnapshot.loaded {
 		m.phase = phaseInitialLoadFailed
 		if m.refreshNotice == "" {
 			m.refreshNotice = "No inventory source loaded."
@@ -73,14 +89,14 @@ func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
 	m.reconcileCreateBlock()
 	m.phase = phaseReady
 	selected := m.selectedID
-	if m.selectSprite != "" {
-		for _, row := range m.destinations {
-			if endpoint, ok := row.Endpoint.(catalog.SpriteEndpoint); ok && endpoint.Name == m.selectSprite {
+	if m.home.selectSprite != "" {
+		for _, row := range m.home.destinations {
+			if endpoint, ok := row.Endpoint.(catalog.SpriteEndpoint); ok && endpoint.Name == m.home.selectSprite {
 				selected = row.ID
 				break
 			}
 		}
-		m.selectSprite = ""
+		m.home.selectSprite = ""
 	}
 	m.syncEndpointItems(selected)
 	return m, nil
@@ -113,13 +129,13 @@ func inventoryNotice(inventory catalog.Inventory, initial bool) string {
 }
 
 func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || m.phase != phaseCreatingSprite {
+	if msg.opID != m.operation.id || m.phase != phaseCreatingSprite {
 		return m, nil
 	}
 	m.cancelOperation()
 	result := msg.result
 	if result.Confirmed && spriteapi.ValidName(result.Name) == nil {
-		m.selectSprite = result.Name
+		m.home.selectSprite = result.Name
 		m.phase = phaseReady
 		return m, m.beginSilentInventory()
 	}
@@ -133,8 +149,8 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	m.createBlock = result.Name
-	m.createNotice = "Creation outcome is unknown. Reconcile " + printable(result.Name) + " before creating another Sprite."
+	m.home.createBlock = result.Name
+	m.home.createNotice = "Creation outcome is unknown. Reconcile " + printable(result.Name) + " before creating another Sprite."
 	m.phase = phaseReady
 	return m, m.beginSilentInventory()
 }
@@ -148,13 +164,11 @@ func (m *Model) beginSilentInventory() tea.Cmd {
 }
 
 func (m *Model) beginInventoryWithFeedback(visible bool) tea.Cmd {
-	m.startOperation()
+	opID, ctx := m.beginOperation()
 	if m.phase != phaseLoading {
-		m.inventoryRefreshing = true
-		m.inventoryRefreshVisible = visible
+		m.home.inventoryRefreshing = true
+		m.home.inventoryRefreshVisible = visible
 	}
-	opID := m.operationID
-	ctx := m.operationContext()
 	operations := m.operations
 	return func() tea.Msg {
 		return inventoryDone{opID: opID, inventory: operations.Inventory(ctx)}
@@ -166,21 +180,19 @@ func (m *Model) beginCreate(name string) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	m.startOperation()
+	opID, ctx := m.beginOperation()
 	m.phase = phaseCreatingSprite
-	opID := m.operationID
-	ctx := m.operationContext()
 	return func() tea.Msg { return createDone{opID: opID, result: operations.Create(ctx, name)} }
 }
 
 func (m *Model) reconcileCreateBlock() {
-	if m.createBlock == "" || !m.spriteSnapshot.current {
+	if m.home.createBlock == "" || !m.home.spriteSnapshot.current {
 		return
 	}
-	for _, destination := range m.spriteSnapshot.rows {
-		if endpoint, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok && endpoint.Name == m.createBlock {
-			m.createBlock = ""
-			m.createNotice = ""
+	for _, destination := range m.home.spriteSnapshot.rows {
+		if endpoint, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok && endpoint.Name == m.home.createBlock {
+			m.home.createBlock = ""
+			m.home.createNotice = ""
 			return
 		}
 	}

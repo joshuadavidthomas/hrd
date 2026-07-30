@@ -84,6 +84,12 @@ type sourceSnapshot struct {
 	current bool
 }
 
+type operationState struct {
+	next   uint64
+	id     uint64
+	cancel context.CancelFunc
+}
+
 type keyMap struct {
 	enter   key.Binding
 	refresh key.Binding
@@ -129,32 +135,18 @@ type Model struct {
 	help      help.Model
 	nameInput textinput.Model
 
-	nextOpID      uint64
-	operationID   uint64
-	operationStop context.CancelFunc
-	initialCmd    tea.Cmd
-	quitting      bool
+	operation  operationState
+	initialCmd tea.Cmd
+	quitting   bool
 
-	localSnapshot     sourceSnapshot
-	spriteSnapshot    sourceSnapshot
-	destinations      []catalog.Destination
-	selectedID        catalog.DestinationID
-	endpointSelection catalog.DestinationID
-	selectSprite      string
+	selectedID catalog.DestinationID
 
-	spriteEndpoint          catalog.Destination
-	spriteEndpointSelection catalog.SpriteEndpointSelection
-	spriteDetailEndpointID  catalog.DestinationID
-	spriteSnapshotDetail    sourceSnapshot
+	notice        string
+	refreshNotice string
+	showHelp      bool
 
-	notice                  string
-	createNotice            string
-	refreshNotice           string
-	inventoryRefreshing     bool
-	inventoryRefreshVisible bool
-	createBlock             string
-	showHelp                bool
-
+	home       homeState
+	sessions   sessionsState
 	connection connectionState
 }
 
@@ -241,7 +233,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case refreshTick:
 		cmds := make([]tea.Cmd, 0, 2)
-		if m.screen == screenEndpoints && m.phase == phaseReady && !m.inventoryRefreshing {
+		if m.screen == screenEndpoints && m.phase == phaseReady && !m.home.inventoryRefreshing {
 			cmds = append(cmds, m.beginSilentInventory())
 		}
 		cmds = append(cmds, scheduleRefresh())
@@ -336,8 +328,8 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd := m.beginSpriteRefresh()
 			return m, cmd
 		}
-		if m.inventoryRefreshing {
-			m.inventoryRefreshVisible = true
+		if m.home.inventoryRefreshing {
+			m.home.inventoryRefreshVisible = true
 			return m, m.spinner.Tick
 		}
 		cmd := m.beginInventory()
@@ -365,8 +357,8 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.screen == screenEndpoints && msg.String() == "n" && !m.browser.SettingFilter() {
-		if _, ok := m.operations.(spriteOperations); ok && m.spriteSnapshot.current && m.createBlock == "" {
-			m.startOperation()
+		if _, ok := m.operations.(spriteOperations); ok && m.home.spriteSnapshot.current && m.home.createBlock == "" {
+			m.supersedeOperation()
 			m.nameInput.Reset()
 			m.nameInput.SetValue("")
 			m.nameInput.Focus()
@@ -383,18 +375,15 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		m.selectedID = destination.ID
 		if m.screen == screenEndpoints {
-			m.endpointSelection = destination.ID
+			m.home.endpointSelection = destination.ID
 			if _, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok {
 				selection, err := catalog.SelectSpriteEndpoint(destination)
 				if err != nil {
 					m.notice = prepareFailureNotice(err)
 					return m, nil
 				}
-				m.spriteEndpoint = destination
-				m.spriteEndpointSelection = selection
-				m.spriteDetailEndpointID = destination.ID
-				m.spriteSnapshot.current = false
-				m.spriteSnapshotDetail = sourceSnapshot{}
+				m.sessions.open(destination, selection)
+				m.home.invalidateSprites()
 				m.screen = screenSprite
 				m.phase = phaseLoadingSprite
 				m.browser.ResetFilter()
@@ -420,7 +409,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if destination, ok := m.selectedDestination(); ok {
 		m.selectedID = destination.ID
 		if m.screen == screenEndpoints {
-			m.endpointSelection = destination.ID
+			m.home.endpointSelection = destination.ID
 		}
 	}
 	return m, cmd
@@ -430,35 +419,33 @@ func (m *Model) returnToEndpoints() tea.Cmd {
 	m.screen = screenEndpoints
 	m.phase = phaseReady
 	m.browser.ResetFilter()
-	m.syncEndpointItems(m.endpointSelection)
-	if !m.spriteSnapshot.loaded || m.spriteSnapshot.current {
+	m.syncEndpointItems(m.home.endpointSelection)
+	if !m.home.spriteSnapshot.loaded || m.home.spriteSnapshot.current {
 		return nil
 	}
 	return m.beginSilentInventory()
 }
 
-func (m *Model) startOperation() {
+func (m *Model) supersedeOperation() uint64 {
 	m.cancelOperation()
-	m.inventoryRefreshing = false
-	m.inventoryRefreshVisible = false
-	m.operationID = m.nextID()
+	m.home.inventoryRefreshing = false
+	m.home.inventoryRefreshVisible = false
+	m.operation.next++
+	m.operation.id = m.operation.next
+	return m.operation.id
 }
 
-func (m *Model) operationContext() context.Context {
+func (m *Model) beginOperation() (uint64, context.Context) {
+	id := m.supersedeOperation()
 	ctx, cancel := context.WithCancel(m.root)
-	m.operationStop = cancel
-	return ctx
-}
-
-func (m *Model) nextID() uint64 {
-	m.nextOpID++
-	return m.nextOpID
+	m.operation.cancel = cancel
+	return id, ctx
 }
 
 func (m *Model) cancelOperation() {
-	if m.operationStop != nil {
-		m.operationStop()
-		m.operationStop = nil
+	if m.operation.cancel != nil {
+		m.operation.cancel()
+		m.operation.cancel = nil
 	}
 }
 

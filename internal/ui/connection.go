@@ -101,7 +101,7 @@ func (m Model) updateStopConfirmation(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || m.phase != phasePreparing {
+	if msg.opID != m.operation.id || m.phase != phasePreparing {
 		closePrepared(msg.prepared)
 		return m, nil
 	}
@@ -179,7 +179,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || m.phase != phaseAttaching {
+	if msg.opID != m.operation.id || m.phase != phaseAttaching {
 		return m, nil
 	}
 	closePrepared(m.connection.prepared)
@@ -199,7 +199,7 @@ func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || m.phase != phaseStartingSSHAgent {
+	if msg.opID != m.operation.id || m.phase != phaseStartingSSHAgent {
 		return m, nil
 	}
 	m.cancelOperation()
@@ -217,7 +217,7 @@ func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateSSHAddDone(msg sshAddDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || m.phase != phaseAddingSSHKey {
+	if msg.opID != m.operation.id || m.phase != phaseAddingSSHKey {
 		return m, nil
 	}
 	if msg.err != nil {
@@ -269,19 +269,15 @@ func (m *Model) beginStop(destination catalog.Destination) tea.Cmd {
 		m.phase = phaseReady
 		return nil
 	}
-	m.startOperation()
+	opID, ctx := m.beginOperation()
 	m.phase = phaseStopping
-	opID := m.operationID
-	ctx := m.operationContext()
 	return func() tea.Msg { return stopDone{opID: opID, err: operations.StopSpriteSession(ctx, selection)} }
 }
 
 func (m *Model) beginPrepareLocal(destination catalog.Destination) tea.Cmd {
-	m.startOperation()
+	opID, ctx := m.beginOperation()
 	m.phase = phasePreparing
 	m.connection.prepare = prepareOperation{destination: destination}
-	opID := m.operationID
-	ctx := m.operationContext()
 	operations := m.operations
 	return func() tea.Msg {
 		prepared, err := operations.Prepare(ctx, destination)
@@ -305,11 +301,9 @@ func (m *Model) startPrepareSprite(destination catalog.Destination, transport ca
 		m.phase = phaseReady
 		return nil
 	}
-	m.startOperation()
+	opID, ctx := m.beginOperation()
 	m.phase = phasePreparing
 	m.connection.prepare = prepareOperation{destination: destination, transport: transport, sprite: true}
-	opID := m.operationID
-	ctx := m.operationContext()
 	return func() tea.Msg {
 		prepared, err := operations.PrepareSprite(ctx, selection, transport)
 		return prepareDone{opID: opID, prepared: prepared, err: err}
@@ -324,10 +318,8 @@ func (m *Model) beginSSHKeyRecovery() tea.Cmd {
 		return nil
 	}
 	m.connection.sshRecoveryTried = true
-	m.startOperation()
+	opID, ctx := m.beginOperation()
 	m.phase = phaseStartingSSHAgent
-	opID := m.operationID
-	ctx := m.operationContext()
 	return func() tea.Msg {
 		command, err := operations.SSHAddCommand(ctx)
 		return sshAddReady{opID: opID, command: command, err: err}
@@ -355,14 +347,14 @@ func (m *Model) beginProcessAttach(prepared catalog.PreparedProcessAttach) tea.C
 	}
 	command.Env = environment
 	m.phase = phaseAttaching
-	opID := m.operationID
+	opID := m.operation.id
 	return m.execProcess(command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
 
 func (m *Model) beginNativeAttach(prepared catalog.PreparedNativeAttach) tea.Cmd {
 	m.invalidateSpriteAttachObservations()
 	m.phase = phaseAttaching
-	opID := m.operationID
+	opID := m.operation.id
 	return m.execCommand(prepared.Command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
 
@@ -370,8 +362,8 @@ func (m *Model) invalidateSpriteAttachObservations() {
 	if !m.connection.prepare.sprite {
 		return
 	}
-	m.spriteSnapshot.current = false
-	m.spriteSnapshotDetail.current = false
+	m.home.invalidateSprites()
+	m.sessions.invalidate()
 	m.syncSpriteItems(m.selectedID)
 }
 
@@ -404,19 +396,19 @@ func withEnvironment(environment []string, name, value string) []string {
 	return append(result, name+"="+value)
 }
 func (m Model) updateStopDone(msg stopDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || m.phase != phaseStopping {
+	if msg.opID != m.operation.id || m.phase != phaseStopping {
 		return m, nil
 	}
 	m.cancelOperation()
 	if msg.err != nil {
 		m.connection.restart = false
 		m.notice = "Couldn’t stop session: " + printable(msg.err.Error())
-		m.spriteSnapshotDetail.current = false
+		m.sessions.invalidate()
 		m.syncSpriteItems(m.connection.destination.ID)
 		cmd := m.beginSpriteRefresh()
 		return m, cmd
 	}
-	m.spriteSnapshotDetail.current = false
+	m.sessions.invalidate()
 	m.syncSpriteItems(m.connection.destination.ID)
 	if m.connection.restart {
 		m.connection.restart = false

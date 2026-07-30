@@ -15,7 +15,7 @@ import (
 )
 
 func (m Model) busy() bool {
-	if m.inventoryRefreshing && m.inventoryRefreshVisible {
+	if m.home.inventoryRefreshing && m.home.inventoryRefreshVisible {
 		return true
 	}
 	switch m.phase {
@@ -201,7 +201,7 @@ func (m Model) bodyView(width, height int) string {
 
 func (m Model) toastView() string {
 	notices := make([]string, 0, 3)
-	for _, notice := range []string{m.notice, m.createNotice, m.refreshNotice} {
+	for _, notice := range []string{m.notice, m.home.createNotice, m.refreshNotice} {
 		if notice == "" {
 			continue
 		}
@@ -213,7 +213,7 @@ func (m Model) toastView() string {
 		notices = append(notices, style.Render("! "+printable(notice)))
 	}
 	progress := ""
-	if m.inventoryRefreshing && m.inventoryRefreshVisible {
+	if m.home.inventoryRefreshing && m.home.inventoryRefreshVisible {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing local and Sprite inventory…")
 	} else if m.phase == phaseRefreshingSprite {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing "+m.spriteName()+" sessions…")
@@ -273,8 +273,8 @@ func (m Model) listView(width, height int) string {
 	panelCount := 1
 	if m.screen == screenEndpoints {
 		panelCount = 0
-		hasLocal := m.browser.FilterState() == list.Unfiltered && m.localSnapshot.loaded
-		hasSprites := m.browser.FilterState() == list.Unfiltered && m.spriteSnapshot.loaded
+		hasLocal := m.browser.FilterState() == list.Unfiltered && m.home.localSnapshot.loaded
+		hasSprites := m.browser.FilterState() == list.Unfiltered && m.home.spriteSnapshot.loaded
 		for _, raw := range visible {
 			item, ok := raw.(browserItem)
 			if !ok {
@@ -354,19 +354,19 @@ func (m Model) listView(width, height int) string {
 		parts = append(parts, centerPanel(lipgloss.NewStyle().Width(panelWidth).Render(clip(filter, panelWidth))))
 	}
 	if m.screen == screenSprite {
-		badge := fmt.Sprintf("%d", len(m.spriteSnapshotDetail.rows))
+		badge := fmt.Sprintf("%d", len(m.sessions.spriteSnapshotDetail.rows))
 		parts = append(parts, centerPanel(renderBrowserPanel(m.spriteName()+" sessions", badge, renderEntries(sessions), panelWidth, "No Herdr sessions found.")))
 	} else {
-		if len(local) > 0 || (m.browser.FilterState() == list.Unfiltered && m.localSnapshot.loaded) {
-			badge := fmt.Sprintf("%d", len(m.localSnapshot.rows))
-			if !m.localSnapshot.current {
+		if len(local) > 0 || (m.browser.FilterState() == list.Unfiltered && m.home.localSnapshot.loaded) {
+			badge := fmt.Sprintf("%d", len(m.home.localSnapshot.rows))
+			if !m.home.localSnapshot.current {
 				badge = "refresh failed · " + badge
 			}
 			parts = append(parts, centerPanel(renderBrowserPanel("Local sessions", badge, renderEntries(local), panelWidth, "No local sessions.")))
 		}
-		if len(sprites) > 0 || (m.browser.FilterState() == list.Unfiltered && m.spriteSnapshot.loaded) {
-			badge := fmt.Sprintf("%d", len(m.spriteSnapshot.rows))
-			if !m.spriteSnapshot.current {
+		if len(sprites) > 0 || (m.browser.FilterState() == list.Unfiltered && m.home.spriteSnapshot.loaded) {
+			badge := fmt.Sprintf("%d", len(m.home.spriteSnapshot.rows))
+			if !m.home.spriteSnapshot.current {
 				badge = "refresh failed · " + badge
 			}
 			parts = append(parts, centerPanel(renderBrowserPanel("Sprites", badge, renderEntries(sprites), panelWidth, "No Sprites.")))
@@ -588,7 +588,7 @@ func (m Model) helpView() string {
 			if _, ok := m.selectedDestination(); ok && m.selectedCurrent() {
 				actions = append(actions, m.keys.enter)
 			}
-			if _, ok := m.operations.(spriteOperations); ok && m.spriteSnapshot.current && m.createBlock == "" {
+			if _, ok := m.operations.(spriteOperations); ok && m.home.spriteSnapshot.current && m.home.createBlock == "" {
 				actions = append(actions, m.keys.create)
 			}
 			navigation := []key.Binding{movement, filtering, m.keys.refresh, m.keys.quit, m.keys.help}
@@ -606,7 +606,7 @@ func (m Model) helpView() string {
 }
 
 func (m Model) spriteName() string {
-	if endpoint, ok := m.spriteEndpoint.Endpoint.(catalog.SpriteEndpoint); ok {
+	if endpoint, ok := m.sessions.spriteEndpoint.Endpoint.(catalog.SpriteEndpoint); ok {
 		return printable(endpoint.Name)
 	}
 	if endpoint, ok := m.connection.prepare.destination.Endpoint.(catalog.SpriteEndpoint); ok {
@@ -632,7 +632,7 @@ func (m Model) browserPanelWidth(available int) int {
 	}
 	if m.screen == screenSprite {
 		title := m.spriteName() + " sessions"
-		badge := fmt.Sprintf("%d", len(m.spriteSnapshotDetail.rows))
+		badge := fmt.Sprintf("%d", len(m.sessions.spriteSnapshotDetail.rows))
 		ideal = max(ideal, lipgloss.Width(title)+lipgloss.Width(badge)+9)
 	}
 	return max(1, min(available, min(maxBrowserPanelWidth, ideal)))

@@ -140,8 +140,8 @@ func (*fakeTerminalCommand) SetStderr(io.Writer) {}
 func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 	ops := &fakeOperations{}
 	model := New(context.Background(), ops)
-	if model.phase != phaseLoading || model.operationID != 1 || len(model.browser.Items()) != 0 {
-		t.Fatalf("new model phase/id/items = %v/%d/%d", model.phase, model.operationID, len(model.browser.Items()))
+	if model.phase != phaseLoading || model.operation.id != 1 || len(model.browser.Items()) != 0 {
+		t.Fatalf("new model phase/id/items = %v/%d/%d", model.phase, model.operation.id, len(model.browser.Items()))
 	}
 	if view := model.View(); view.Content != "" || !view.AltScreen || view.WindowTitle == "" {
 		t.Fatalf("initial view = content %q alt %v title %q", view.Content, view.AltScreen, view.WindowTitle)
@@ -341,8 +341,8 @@ func TestRefreshToastDoesNotMoveCenteredContent(t *testing.T) {
 		return -1, -1
 	}
 	baseRow, baseColumn := position(model.View().Content, "hrd")
-	model.inventoryRefreshing = true
-	model.inventoryRefreshVisible = true
+	model.home.inventoryRefreshing = true
+	model.home.inventoryRefreshVisible = true
 	refreshing := model.View().Content
 	toastRow, toastColumn := position(refreshing, "hrd")
 	if baseRow != toastRow || baseColumn != toastColumn {
@@ -382,8 +382,8 @@ func TestPartialSourceFailureRetainsStaleRowsAndDisablesTheirActions(t *testing.
 	model.selectedID = selected(t, model).ID
 	model, refresh := update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.phase != phaseReady || !model.localSnapshot.current || model.spriteSnapshot.current {
-		t.Fatalf("snapshot current flags = local %v Sprite %v", model.localSnapshot.current, model.spriteSnapshot.current)
+	if model.phase != phaseReady || !model.home.localSnapshot.current || model.home.spriteSnapshot.current {
+		t.Fatalf("snapshot current flags = local %v Sprite %v", model.home.localSnapshot.current, model.home.spriteSnapshot.current)
 	}
 	if selected(t, model).Label != "devbox" {
 		t.Fatalf("selection was not retained: %q", selected(t, model).Label)
@@ -413,13 +413,13 @@ func TestLocalSourceFailureRetainsSpritesAndRecovers(t *testing.T) {
 	model := ready(t, ops)
 	model, refresh := update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.localSnapshot.current || !model.spriteSnapshot.current || len(model.browser.Items()) != 3 {
-		t.Fatalf("partial local failure = local %v Sprite %v items %d", model.localSnapshot.current, model.spriteSnapshot.current, len(model.browser.Items()))
+	if model.home.localSnapshot.current || !model.home.spriteSnapshot.current || len(model.browser.Items()) != 3 {
+		t.Fatalf("partial local failure = local %v Sprite %v items %d", model.home.localSnapshot.current, model.home.spriteSnapshot.current, len(model.browser.Items()))
 	}
 	model, refresh = update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, refresh))
-	if !model.localSnapshot.current || !model.spriteSnapshot.current || model.refreshNotice != "" {
-		t.Fatalf("source recovery = local %v Sprite %v warning %q", model.localSnapshot.current, model.spriteSnapshot.current, model.refreshNotice)
+	if !model.home.localSnapshot.current || !model.home.spriteSnapshot.current || model.refreshNotice != "" {
+		t.Fatalf("source recovery = local %v Sprite %v warning %q", model.home.localSnapshot.current, model.home.spriteSnapshot.current, model.refreshNotice)
 	}
 }
 
@@ -453,19 +453,19 @@ func TestBackgroundRefreshIsSilentAndUpdatesInventory(t *testing.T) {
 		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", state)}}
 	}
 	model := ready(t, ops)
-	oldID := model.operationID
+	oldID := model.operation.id
 
 	model, refresh := update(t, model, refreshTick(time.Now()))
-	if refresh == nil || !model.inventoryRefreshing || model.inventoryRefreshVisible || model.operationID <= oldID {
-		t.Fatalf("background refresh = cmd %v refreshing %v visible %v id %d→%d", refresh, model.inventoryRefreshing, model.inventoryRefreshVisible, oldID, model.operationID)
+	if refresh == nil || !model.home.inventoryRefreshing || model.home.inventoryRefreshVisible || model.operation.id <= oldID {
+		t.Fatalf("background refresh = cmd %v refreshing %v visible %v id %d→%d", refresh, model.home.inventoryRefreshing, model.home.inventoryRefreshVisible, oldID, model.operation.id)
 	}
 	view := ansi.Strip(model.View().Content)
 	if strings.Contains(view, "Refreshing") || strings.Contains(view, "checked") || strings.Contains(view, "ago") {
 		t.Fatalf("background refresh exposed progress or a timer: %q", view)
 	}
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.inventoryRefreshing || ops.inventoryCalls.Load() != 2 {
-		t.Fatalf("background refresh completion = refreshing %v calls %d", model.inventoryRefreshing, ops.inventoryCalls.Load())
+	if model.home.inventoryRefreshing || ops.inventoryCalls.Load() != 2 {
+		t.Fatalf("background refresh completion = refreshing %v calls %d", model.home.inventoryRefreshing, ops.inventoryCalls.Load())
 	}
 	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "cold") || strings.Contains(view, "checked") || strings.Contains(view, "ago") {
 		t.Fatalf("background refresh did not quietly update lifecycle: %q", view)
@@ -484,8 +484,8 @@ func TestBackgroundRefreshFailureUsesPanelStateWithoutToast(t *testing.T) {
 	model, refresh := update(t, model, refreshTick(time.Now()))
 	model, _ = update(t, model, runFirst(t, refresh))
 	view := ansi.Strip(model.View().Content)
-	if model.spriteSnapshot.current || !strings.Contains(view, "stale") || !strings.Contains(view, "refresh failed") {
-		t.Fatalf("silent failure did not mark panel stale: current %v view %q", model.spriteSnapshot.current, view)
+	if model.home.spriteSnapshot.current || !strings.Contains(view, "stale") || !strings.Contains(view, "refresh failed") {
+		t.Fatalf("silent failure did not mark panel stale: current %v view %q", model.home.spriteSnapshot.current, view)
 	}
 	if strings.Contains(view, "provider unavailable") || strings.Contains(view, "Refreshing") {
 		t.Fatalf("silent failure rendered a toast: %q", view)
@@ -496,12 +496,12 @@ func TestNamingSupersedesBackgroundRefresh(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	model := ready(t, ops)
 	model, _ = update(t, model, refreshTick(time.Now()))
-	refreshID := model.operationID
+	refreshID := model.operation.id
 
 	model, _ = update(t, model, press("n"))
 	model, _ = update(t, model, press("x"))
-	if model.phase != phaseNamingSprite || model.nameInput.Value() != "x" || model.inventoryRefreshing || model.operationID <= refreshID {
-		t.Fatalf("naming did not supersede refresh = phase %v value %q refreshing %v id %d→%d", model.phase, model.nameInput.Value(), model.inventoryRefreshing, refreshID, model.operationID)
+	if model.phase != phaseNamingSprite || model.nameInput.Value() != "x" || model.home.inventoryRefreshing || model.operation.id <= refreshID {
+		t.Fatalf("naming did not supersede refresh = phase %v value %q refreshing %v id %d→%d", model.phase, model.nameInput.Value(), model.home.inventoryRefreshing, refreshID, model.operation.id)
 	}
 	model, cmd := update(t, model, inventoryDone{opID: refreshID, inventory: catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Cold)}}})
 	if cmd != nil || model.phase != phaseNamingSprite || model.nameInput.Value() != "x" {
@@ -517,8 +517,8 @@ func TestFilterOpenBeforeBackgroundRefreshSurvivesCompletion(t *testing.T) {
 		model, _ = update(t, model, press(string(letter)))
 	}
 	model, refresh := update(t, model, refreshTick(time.Now()))
-	if refresh == nil || !model.inventoryRefreshing || model.inventoryRefreshVisible {
-		t.Fatalf("filter blocked silent refresh = cmd %v refreshing %v visible %v", refresh, model.inventoryRefreshing, model.inventoryRefreshVisible)
+	if refresh == nil || !model.home.inventoryRefreshing || model.home.inventoryRefreshVisible {
+		t.Fatalf("filter blocked silent refresh = cmd %v refreshing %v visible %v", refresh, model.home.inventoryRefreshing, model.home.inventoryRefreshVisible)
 	}
 	model, _ = update(t, model, runFirst(t, refresh))
 	if !model.browser.SettingFilter() || model.browser.FilterValue() != "alp" || len(model.browser.VisibleItems()) != 1 {
@@ -530,8 +530,8 @@ func TestFilterStartedDuringEndpointRefreshSurvivesCompletion(t *testing.T) {
 	ops := &fakeOperations{}
 	model := ready(t, ops)
 	model, refresh := update(t, model, press("r"))
-	if !model.inventoryRefreshing || refresh == nil {
-		t.Fatalf("background refresh = refreshing %v cmd %v", model.inventoryRefreshing, refresh)
+	if !model.home.inventoryRefreshing || refresh == nil {
+		t.Fatalf("background refresh = refreshing %v cmd %v", model.home.inventoryRefreshing, refresh)
 	}
 
 	model, _ = update(t, model, press("/"))
@@ -564,8 +564,8 @@ func TestInventoryRefreshKeepsReadyInteractionsAndCancelsOnNewEffect(t *testing.
 	}
 	model := ready(t, ops)
 	model, refresh := update(t, model, press("r"))
-	if model.phase != phaseReady || !model.inventoryRefreshing || !strings.Contains(model.View().Content, "Refreshing local") {
-		t.Fatalf("refresh blocked view = phase %v refreshing %v view %q", model.phase, model.inventoryRefreshing, model.View().Content)
+	if model.phase != phaseReady || !model.home.inventoryRefreshing || !strings.Contains(model.View().Content, "Refreshing local") {
+		t.Fatalf("refresh blocked view = phase %v refreshing %v view %q", model.phase, model.home.inventoryRefreshing, model.View().Content)
 	}
 	model, _ = update(t, model, press("down"))
 	if selected(t, model).Label != "alpha" {
@@ -579,8 +579,8 @@ func TestInventoryRefreshKeepsReadyInteractionsAndCancelsOnNewEffect(t *testing.
 		t.Fatal("refresh did not start")
 	}
 	model, prepare := update(t, model, press("enter"))
-	if model.phase != phasePreparing || model.inventoryRefreshing || prepare == nil {
-		t.Fatalf("new effect did not supersede refresh = phase %v refreshing %v cmd %v", model.phase, model.inventoryRefreshing, prepare)
+	if model.phase != phasePreparing || model.home.inventoryRefreshing || prepare == nil {
+		t.Fatalf("new effect did not supersede refresh = phase %v refreshing %v cmd %v", model.phase, model.home.inventoryRefreshing, prepare)
 	}
 	select {
 	case completion := <-done:
@@ -736,7 +736,7 @@ func TestSpriteDetailSnapshotIsResetAcrossEndpoints(t *testing.T) {
 	model, _ = update(t, model, runFirst(t, reconcile))
 	model.browser.Select(3)
 	model, load = update(t, model, press("enter"))
-	if len(model.browser.Items()) != 0 || model.spriteSnapshotDetail.loaded {
+	if len(model.browser.Items()) != 0 || model.sessions.spriteSnapshotDetail.loaded {
 		t.Fatal("beta load exposed alpha snapshot")
 	}
 	model, _ = update(t, model, runFirst(t, load))
@@ -913,8 +913,8 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 			if model.phase != phaseAttaching || handoff == nil {
 				t.Fatalf("handoff phase/cmd = %v/%v", model.phase, handoff)
 			}
-			if model.spriteSnapshot.current || model.spriteSnapshotDetail.current {
-				t.Fatalf("attach retained current observations = endpoint %v sessions %v", model.spriteSnapshot.current, model.spriteSnapshotDetail.current)
+			if model.home.spriteSnapshot.current || model.sessions.spriteSnapshotDetail.current {
+				t.Fatalf("attach retained current observations = endpoint %v sessions %v", model.home.spriteSnapshot.current, model.sessions.spriteSnapshotDetail.current)
 			}
 			if tc.transport == catalog.NativePreview {
 				if native != terminal || len(processArgs) != 0 {
@@ -954,23 +954,23 @@ func TestBackAfterNativeAttachReconcilesSpriteLifecycle(t *testing.T) {
 	model, _ = update(t, model, runFirst(t, load))
 	model, _ = update(t, model, press("enter"))
 	model.execCommand = func(tea.ExecCommand, tea.ExecCallback) tea.Cmd {
-		return func() tea.Msg { return attachDone{opID: model.operationID} }
+		return func() tea.Msg { return attachDone{opID: model.operation.id} }
 	}
 	model, prepare := update(t, model, press("enter"))
 	model, attach := update(t, model, runFirst(t, prepare))
 	model, sessions := update(t, model, run(t, attach))
 	model, _ = update(t, model, runFirst(t, sessions))
-	if model.spriteSnapshot.current {
+	if model.home.spriteSnapshot.current {
 		t.Fatal("successful native attach left pre-attach provider lifecycle current")
 	}
 
 	model, reconcile := update(t, model, press("esc"))
-	if reconcile == nil || !model.inventoryRefreshing || model.spriteSnapshot.current || !strings.Contains(ansi.Strip(model.View().Content), "stale") {
-		t.Fatalf("back did not invalidate and reconcile lifecycle: refreshing %v current %v view %q cmd %v", model.inventoryRefreshing, model.spriteSnapshot.current, model.View().Content, reconcile)
+	if reconcile == nil || !model.home.inventoryRefreshing || model.home.spriteSnapshot.current || !strings.Contains(ansi.Strip(model.View().Content), "stale") {
+		t.Fatalf("back did not invalidate and reconcile lifecycle: refreshing %v current %v view %q cmd %v", model.home.inventoryRefreshing, model.home.spriteSnapshot.current, model.View().Content, reconcile)
 	}
 	model, _ = update(t, model, runFirst(t, reconcile))
-	if !model.spriteSnapshot.current || !strings.Contains(ansi.Strip(model.View().Content), "running") || strings.Contains(ansi.Strip(model.View().Content), "cold") {
-		t.Fatalf("reconciled lifecycle = current %v view %q", model.spriteSnapshot.current, model.View().Content)
+	if !model.home.spriteSnapshot.current || !strings.Contains(ansi.Strip(model.View().Content), "running") || strings.Contains(ansi.Strip(model.View().Content), "cold") {
+		t.Fatalf("reconciled lifecycle = current %v view %q", model.home.spriteSnapshot.current, model.View().Content)
 	}
 }
 
@@ -983,16 +983,16 @@ func TestStopErrorInvalidatesUntilSpriteRefreshReconciles(t *testing.T) {
 	model, _ = update(t, model, press("s"))
 	model, stop := update(t, model, press("y"))
 	model, refresh := update(t, model, runFirst(t, stop))
-	if model.phase != phaseRefreshingSprite || model.spriteSnapshotDetail.current || refresh == nil {
-		t.Fatalf("stop error state = phase %v current %v cmd %v", model.phase, model.spriteSnapshotDetail.current, refresh)
+	if model.phase != phaseRefreshingSprite || model.sessions.spriteSnapshotDetail.current || refresh == nil {
+		t.Fatalf("stop error state = phase %v current %v cmd %v", model.phase, model.sessions.spriteSnapshotDetail.current, refresh)
 	}
 	if !strings.Contains(model.notice, "stop response lost") || strings.Contains(model.helpView(), "stop") || strings.Contains(model.helpView(), "restart") {
 		t.Fatalf("stop error notice/help = %q/%q", model.notice, model.helpView())
 	}
 
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.phase != phaseReady || !model.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "stop response lost") {
-		t.Fatalf("reconciled stop error = phase %v current %v view %q", model.phase, model.spriteSnapshotDetail.current, model.View().Content)
+	if model.phase != phaseReady || !model.sessions.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "stop response lost") {
+		t.Fatalf("reconciled stop error = phase %v current %v view %q", model.phase, model.sessions.spriteSnapshotDetail.current, model.View().Content)
 	}
 }
 
@@ -1018,8 +1018,8 @@ func TestStopConfirmationAndRestartComposeStopThenAttach(t *testing.T) {
 	}
 	model, stop = update(t, model, press("enter"))
 	model, follow := update(t, model, runFirst(t, stop))
-	if follow == nil || ops.stopCalls.Load() != 1 || model.phase != phasePreparing || model.spriteSnapshotDetail.current {
-		t.Fatalf("restart composition = calls %d phase %v current %v cmd %v", ops.stopCalls.Load(), model.phase, model.spriteSnapshotDetail.current, follow)
+	if follow == nil || ops.stopCalls.Load() != 1 || model.phase != phasePreparing || model.sessions.spriteSnapshotDetail.current {
+		t.Fatalf("restart composition = calls %d phase %v current %v cmd %v", ops.stopCalls.Load(), model.phase, model.sessions.spriteSnapshotDetail.current, follow)
 	}
 }
 
@@ -1040,16 +1040,16 @@ func TestRestartTransportCancelDoesNotStopAndPrepareFailureRefreshesWithNotice(t
 	model, _ = update(t, model, press("y"))
 	model, stop := update(t, model, press("enter"))
 	model, prepare := update(t, model, runFirst(t, stop))
-	if model.spriteSnapshotDetail.current || model.phase != phasePreparing || prepare == nil {
-		t.Fatalf("post-stop invalidation = current %v phase %v cmd %v", model.spriteSnapshotDetail.current, model.phase, prepare)
+	if model.sessions.spriteSnapshotDetail.current || model.phase != phasePreparing || prepare == nil {
+		t.Fatalf("post-stop invalidation = current %v phase %v cmd %v", model.sessions.spriteSnapshotDetail.current, model.phase, prepare)
 	}
 	model, refresh := update(t, model, runFirst(t, prepare))
 	if model.phase != phaseRefreshingSprite || refresh == nil || !strings.Contains(model.notice, "native setup failed") {
 		t.Fatalf("prepare failure refresh = phase %v notice %q cmd %v", model.phase, model.notice, refresh)
 	}
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.phase != phaseReady || !model.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "native setup failed") {
-		t.Fatalf("post-failure refresh = phase %v current %v view %q", model.phase, model.spriteSnapshotDetail.current, model.View().Content)
+	if model.phase != phaseReady || !model.sessions.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "native setup failed") {
+		t.Fatalf("post-failure refresh = phase %v current %v view %q", model.phase, model.sessions.spriteSnapshotDetail.current, model.View().Content)
 	}
 }
 
@@ -1077,7 +1077,7 @@ func TestAttachFailureNoticeSurvivesAutomaticRefresh(t *testing.T) {
 			}
 			model.execCommand = func(tea.ExecCommand, tea.ExecCallback) tea.Cmd {
 				return func() tea.Msg {
-					return attachDone{opID: model.operationID, err: errors.New("native control failure\nunsafe")}
+					return attachDone{opID: model.operation.id, err: errors.New("native control failure\nunsafe")}
 				}
 			}
 			model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
@@ -1107,8 +1107,8 @@ func TestBackgroundInventoryRefreshDoesNotPollSpriteDetail(t *testing.T) {
 	sessionCalls := ops.listSpriteCalls.Load()
 
 	model, cmd := update(t, model, refreshTick(time.Now()))
-	if cmd == nil || model.phase != phaseReady || model.inventoryRefreshing || ops.inventoryCalls.Load() != inventoryCalls || ops.listSpriteCalls.Load() != sessionCalls {
-		t.Fatalf("detail refresh tick polled = phase %v refreshing %v inventory %d→%d sessions %d→%d cmd %v", model.phase, model.inventoryRefreshing, inventoryCalls, ops.inventoryCalls.Load(), sessionCalls, ops.listSpriteCalls.Load(), cmd)
+	if cmd == nil || model.phase != phaseReady || model.home.inventoryRefreshing || ops.inventoryCalls.Load() != inventoryCalls || ops.listSpriteCalls.Load() != sessionCalls {
+		t.Fatalf("detail refresh tick polled = phase %v refreshing %v inventory %d→%d sessions %d→%d cmd %v", model.phase, model.home.inventoryRefreshing, inventoryCalls, ops.inventoryCalls.Load(), sessionCalls, ops.listSpriteCalls.Load(), cmd)
 	}
 	content := ansi.Strip(model.View().Content)
 	if strings.Contains(content, "checked") || strings.Contains(content, "ago") {
@@ -1168,7 +1168,7 @@ func TestHelpOnlyShowsSelectionCapabilities(t *testing.T) {
 	if help := model.helpView(); !strings.Contains(help, "enter") || !strings.Contains(help, "move") || !strings.Contains(help, "filter") || strings.Contains(help, "restart") || strings.Contains(help, "stop") {
 		t.Fatalf("stopped-session help = %q", help)
 	}
-	model.spriteSnapshotDetail.current = false
+	model.sessions.spriteSnapshotDetail.current = false
 	model.syncSpriteItems(selected(t, model).ID)
 	if help := model.helpView(); strings.Contains(help, "enter") || strings.Contains(help, "restart") || strings.Contains(help, "stop") {
 		t.Fatalf("stale-session help exposes actions = %q", help)
@@ -1274,12 +1274,12 @@ func TestConfirmedAndRejectedCreateOutcomes(t *testing.T) {
 		model.nameInput.SetValue("newbox")
 		model, create := update(t, model, press("enter"))
 		model, refresh := update(t, model, runFirst(t, create))
-		if !model.inventoryRefreshing || model.inventoryRefreshVisible || strings.Contains(ansi.Strip(model.View().Content), "Refreshing") {
-			t.Fatalf("confirmed create reconciliation was visible: refreshing %v visible %v view %q", model.inventoryRefreshing, model.inventoryRefreshVisible, model.View().Content)
+		if !model.home.inventoryRefreshing || model.home.inventoryRefreshVisible || strings.Contains(ansi.Strip(model.View().Content), "Refreshing") {
+			t.Fatalf("confirmed create reconciliation was visible: refreshing %v visible %v view %q", model.home.inventoryRefreshing, model.home.inventoryRefreshVisible, model.View().Content)
 		}
 		model, _ = update(t, model, runFirst(t, refresh))
-		if selected(t, model).Label != "newbox" || model.createBlock != "" {
-			t.Fatalf("confirmed create selection/block = %q/%q", selected(t, model).Label, model.createBlock)
+		if selected(t, model).Label != "newbox" || model.home.createBlock != "" {
+			t.Fatalf("confirmed create selection/block = %q/%q", selected(t, model).Label, model.home.createBlock)
 		}
 	})
 	t.Run("rejected", func(t *testing.T) {
@@ -1292,8 +1292,8 @@ func TestConfirmedAndRejectedCreateOutcomes(t *testing.T) {
 		model.nameInput.SetValue("newbox")
 		model, create := update(t, model, press("enter"))
 		model, _ = update(t, model, runFirst(t, create))
-		if model.phase != phaseNamingSprite || !model.nameInput.Focused() || !strings.Contains(model.View().Content, "name refused") || model.inventoryRefreshing {
-			t.Fatalf("rejected create = phase %v focused %v refreshing %v view %q", model.phase, model.nameInput.Focused(), model.inventoryRefreshing, model.View().Content)
+		if model.phase != phaseNamingSprite || !model.nameInput.Focused() || !strings.Contains(model.View().Content, "name refused") || model.home.inventoryRefreshing {
+			t.Fatalf("rejected create = phase %v focused %v refreshing %v view %q", model.phase, model.nameInput.Focused(), model.home.inventoryRefreshing, model.View().Content)
 		}
 	})
 }
@@ -1319,8 +1319,8 @@ func TestUnknownCreateOutcomeBlocksFurtherCreationUntilInventoryReconciles(t *te
 	model.nameInput.SetValue("newbox")
 	model, create := update(t, model, press("enter"))
 	model, refresh := update(t, model, runFirst(t, create))
-	if model.createBlock != "newbox" || model.phase != phaseReady || !model.inventoryRefreshing || model.inventoryRefreshVisible || refresh == nil {
-		t.Fatalf("unknown outcome block/phase/refreshing/visible/cmd = %q/%v/%v/%v/%v", model.createBlock, model.phase, model.inventoryRefreshing, model.inventoryRefreshVisible, refresh)
+	if model.home.createBlock != "newbox" || model.phase != phaseReady || !model.home.inventoryRefreshing || model.home.inventoryRefreshVisible || refresh == nil {
+		t.Fatalf("unknown outcome block/phase/refreshing/visible/cmd = %q/%v/%v/%v/%v", model.home.createBlock, model.phase, model.home.inventoryRefreshing, model.home.inventoryRefreshVisible, refresh)
 	}
 	model, _ = update(t, model, runFirst(t, refresh))
 	if !strings.Contains(model.View().Content, "outcome is unknown") || !strings.Contains(model.View().Content, "refresh failed") || strings.Contains(model.View().Content, "cannot reconcile") {
@@ -1332,8 +1332,8 @@ func TestUnknownCreateOutcomeBlocksFurtherCreationUntilInventoryReconciles(t *te
 	}
 	model, refresh = update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.createBlock != "" || model.createNotice != "" {
-		t.Fatalf("confirmed reconciliation did not clear create block/notice: %q/%q", model.createBlock, model.createNotice)
+	if model.home.createBlock != "" || model.home.createNotice != "" {
+		t.Fatalf("confirmed reconciliation did not clear create block/notice: %q/%q", model.home.createBlock, model.home.createNotice)
 	}
 }
 

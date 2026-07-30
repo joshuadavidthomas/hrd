@@ -75,7 +75,7 @@ func (m Model) selectedCurrent() bool {
 
 func (m Model) selectedSpriteSessionForMutation() (catalog.Destination, bool) {
 	destination, ok := m.selectedDestination()
-	if !ok || !m.spriteSnapshotDetail.current {
+	if !ok || !m.sessions.spriteSnapshotDetail.current {
 		return catalog.Destination{}, false
 	}
 	status, ok := destination.Status.(catalog.SpriteSessionStatus)
@@ -83,19 +83,19 @@ func (m Model) selectedSpriteSessionForMutation() (catalog.Destination, bool) {
 }
 
 func (m *Model) syncEndpointItems(selected catalog.DestinationID) {
-	items := make([]list.Item, 0, len(m.destinations))
-	for _, destination := range m.destinations {
+	items := make([]list.Item, 0, len(m.home.destinations))
+	for _, destination := range m.home.destinations {
 		items = append(items, m.endpointBrowserItem(destination, !m.destinationCurrent(destination)))
 	}
 	m.replaceBrowserItems(items)
 	m.selectListID(selected)
-	m.endpointSelection = m.selectedID
+	m.home.endpointSelection = m.selectedID
 	m.resizeComponents()
 }
 
 func (m *Model) syncSpriteItems(selected catalog.DestinationID) {
-	items := make([]list.Item, 0, len(m.spriteSnapshotDetail.rows))
-	for _, destination := range m.spriteSnapshotDetail.rows {
+	items := make([]list.Item, 0, len(m.sessions.spriteSnapshotDetail.rows))
+	for _, destination := range m.sessions.spriteSnapshotDetail.rows {
 		status, _ := destination.Status.(catalog.SpriteSessionStatus)
 		item := browserItem{
 			destination: destination,
@@ -103,7 +103,7 @@ func (m *Model) syncSpriteItems(selected catalog.DestinationID) {
 			symbol:      "○",
 			state:       "stopped",
 			stateStyle:  mutedStyle,
-			stale:       !m.spriteSnapshotDetail.current,
+			stale:       !m.sessions.spriteSnapshotDetail.current,
 		}
 		if status.Running {
 			item.symbol = "●"
@@ -164,9 +164,9 @@ func (m *Model) selectListID(id catalog.DestinationID) {
 func (m Model) destinationCurrent(destination catalog.Destination) bool {
 	switch destination.Endpoint.(type) {
 	case catalog.LocalEndpoint:
-		return m.localSnapshot.current
+		return m.home.localSnapshot.current
 	case catalog.SpriteEndpoint:
-		return m.spriteSnapshot.current
+		return m.home.spriteSnapshot.current
 	default:
 		return false
 	}

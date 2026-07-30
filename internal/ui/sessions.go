@@ -8,6 +8,24 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 )
 
+type sessionsState struct {
+	spriteEndpoint          catalog.Destination
+	spriteEndpointSelection catalog.SpriteEndpointSelection
+	spriteDetailEndpointID  catalog.DestinationID
+	spriteSnapshotDetail    sourceSnapshot
+}
+
+func (s *sessionsState) open(endpoint catalog.Destination, selection catalog.SpriteEndpointSelection) {
+	s.spriteEndpoint = endpoint
+	s.spriteEndpointSelection = selection
+	s.spriteDetailEndpointID = endpoint.ID
+	s.spriteSnapshotDetail = sourceSnapshot{}
+}
+
+func (s *sessionsState) invalidate() {
+	s.spriteSnapshotDetail.current = false
+}
+
 type spriteSessionsDone struct {
 	opID       uint64
 	endpointID catalog.DestinationID
@@ -32,23 +50,23 @@ func (m Model) updateSpriteInstallConfirmation(msg tea.KeyPressMsg) (tea.Model, 
 }
 
 func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || msg.endpointID != m.spriteDetailEndpointID || (m.phase != phaseLoadingSprite && m.phase != phaseRefreshingSprite) {
+	if msg.opID != m.operation.id || msg.endpointID != m.sessions.spriteDetailEndpointID || (m.phase != phaseLoadingSprite && m.phase != phaseRefreshingSprite) {
 		return m, nil
 	}
 	initial := m.phase == phaseLoadingSprite
 	m.cancelOperation()
 	if errors.Is(msg.err, catalog.ErrSpriteHerdrMissing) {
-		m.spriteSnapshotDetail = sourceSnapshot{}
+		m.sessions.spriteSnapshotDetail = sourceSnapshot{}
 		m.refreshNotice = ""
 		m.phase = phaseConfirmingSpriteInstall
 		m.syncSpriteItems("")
 		return m, nil
 	}
 	if msg.err != nil {
-		m.spriteSnapshotDetail.current = false
+		m.sessions.invalidate()
 		m.refreshNotice = "Sprite session refresh failed: " + printable(msg.err.Error())
 	} else {
-		m.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), msg.rows...), loaded: true, current: true}
+		m.sessions.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), msg.rows...), loaded: true, current: true}
 		m.refreshNotice = ""
 	}
 	m.phase = phaseReady
@@ -61,7 +79,7 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 }
 
 func (m Model) updateInstallSpriteHerdrDone(msg installSpriteHerdrDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operationID || m.phase != phaseInstallingSpriteHerdr {
+	if msg.opID != m.operation.id || m.phase != phaseInstallingSpriteHerdr {
 		return m, nil
 	}
 	m.cancelOperation()
@@ -80,11 +98,9 @@ func (m *Model) beginSpriteSessions() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	m.startOperation()
-	opID := m.operationID
-	ctx := m.operationContext()
-	endpointID := m.spriteDetailEndpointID
-	selection := m.spriteEndpointSelection
+	opID, ctx := m.beginOperation()
+	endpointID := m.sessions.spriteDetailEndpointID
+	selection := m.sessions.spriteEndpointSelection
 	return func() tea.Msg {
 		rows, err := operations.ListSpriteSessions(ctx, selection)
 		return spriteSessionsDone{opID: opID, endpointID: endpointID, rows: append([]catalog.Destination(nil), rows...), err: err}
@@ -96,11 +112,9 @@ func (m *Model) beginInstallSpriteHerdr() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	m.startOperation()
+	opID, ctx := m.beginOperation()
 	m.phase = phaseInstallingSpriteHerdr
-	opID := m.operationID
-	ctx := m.operationContext()
-	selection := m.spriteEndpointSelection
+	selection := m.sessions.spriteEndpointSelection
 	return func() tea.Msg {
 		return installSpriteHerdrDone{opID: opID, err: operations.InstallSpriteHerdr(ctx, selection)}
 	}
