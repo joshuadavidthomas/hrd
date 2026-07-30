@@ -35,7 +35,9 @@ it outside `hrd`.
 Selecting a Sprite wakes only that Sprite and opens its Herdr sessions. The
 opening inventory never wakes every Sprite. Session rows show Herdr's own
 running or stopped state; the endpoint row separately shows the latest Sprite
-API lifecycle observation. Idle inventory refreshes every ten seconds.
+API lifecycle observation. Observation ages update once a second without
+contacting the provider. Press `r` to refresh inventory; `hrd` also refreshes
+after actions that may change Sprite lifecycle.
 
 When Herdr is absent, `hrd` asks before it downloads
 <https://herdr.dev/install.sh> to a validated temporary path, runs that file

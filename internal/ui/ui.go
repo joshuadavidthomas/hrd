@@ -28,7 +28,7 @@ import (
 const (
 	defaultWidth            = 80
 	defaultHeight           = 24
-	refreshInterval         = 10 * time.Second
+	clockInterval           = time.Second
 	minBrowserPanelWidth    = 60
 	maxBrowserPanelWidth    = 82
 	maxSurfaceWidth         = 104
@@ -222,7 +222,7 @@ type sshAddDone struct {
 	err  error
 }
 
-type refreshTick time.Time
+type clockTick time.Time
 
 type prepareOperation struct {
 	destination catalog.Destination
@@ -346,13 +346,13 @@ func New(root context.Context, operations Operations) Model {
 	return m
 }
 
-// Init starts inventory loading, animation, and the idle refresh clock.
+// Init starts inventory loading, animation, and the observation-age clock.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.initialCmd, m.spinner.Tick, scheduleRefresh())
+	return tea.Batch(m.initialCmd, m.spinner.Tick, scheduleClock())
 }
 
-func scheduleRefresh() tea.Cmd {
-	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg { return refreshTick(t) })
+func scheduleClock() tea.Cmd {
+	return tea.Tick(clockInterval, func(t time.Time) tea.Msg { return clockTick(t) })
 }
 
 // Update advances navigation and provider effects.
@@ -377,14 +377,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
-	case refreshTick:
-		cmds := make([]tea.Cmd, 0, 3)
-		if m.screen == screenEndpoints && m.phase == phaseReady && !m.inventoryRefreshing && !m.browser.SettingFilter() {
-			refresh := m.beginInventory()
-			cmds = append(cmds, refresh, m.spinner.Tick)
-		}
-		cmds = append(cmds, scheduleRefresh())
-		return m, tea.Batch(cmds...)
+	case clockTick:
+		return m, scheduleClock()
 	case inventoryDone:
 		return m.updateInventoryDone(msg)
 	case spriteSessionsDone:

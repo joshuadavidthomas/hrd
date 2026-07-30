@@ -405,30 +405,29 @@ func TestTotalInitialFailureRetriesToReady(t *testing.T) {
 	}
 }
 
-func TestIdleRefreshHasGenerationGuardAndPreservesSelection(t *testing.T) {
-	ops := &fakeOperations{}
-	model := ready(t, ops)
-	model, _ = update(t, model, press("down"))
+func TestClockTickAdvancesObservationAgeWithoutRefreshingInventory(t *testing.T) {
+	observed := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	now := observed
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := New(context.Background(), ops)
+	model.now = func() time.Time { return now }
+	model, _ = update(t, model, run(t, model.initialCmd))
 	oldID := model.operationID
-	model, batch := update(t, model, refreshTick(time.Now()))
-	if model.phase != phaseReady || !model.inventoryRefreshing || model.operationID <= oldID || batch == nil {
-		t.Fatalf("idle refresh phase/refreshing/id/cmd = %v/%v/%d/%v", model.phase, model.inventoryRefreshing, model.operationID, batch)
+
+	now = observed.Add(3 * time.Second)
+	model, nextTick := update(t, model, clockTick(now))
+	if nextTick == nil || model.inventoryRefreshing || model.operationID != oldID || ops.inventoryCalls.Load() != 1 {
+		t.Fatalf("clock tick refreshed inventory = cmd %v refreshing %v id %d→%d calls %d", nextTick, model.inventoryRefreshing, oldID, model.operationID, ops.inventoryCalls.Load())
 	}
-	refreshID := model.operationID
-	model, staleCmd := update(t, model, inventoryDone{opID: oldID, inventory: catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()[:1]}, Sprites: catalog.SourceResult{Skipped: true}}})
-	if staleCmd != nil || model.operationID != refreshID || model.phase != phaseReady || !model.inventoryRefreshing {
-		t.Fatal("stale inventory completion replaced the active generation")
-	}
-	model, _ = update(t, model, runFirst(t, batch))
-	if selected(t, model).Label != "alpha" || ops.inventoryCalls.Load() != 2 {
-		t.Fatalf("selection/calls after idle refresh = %q/%d", selected(t, model).Label, ops.inventoryCalls.Load())
+	if view := ansi.Strip(model.View().Content); !strings.Contains(view, "checked 3s ago") {
+		t.Fatalf("clock tick did not advance observation age: %q", view)
 	}
 }
 
 func TestFilterStartedDuringEndpointRefreshSurvivesCompletion(t *testing.T) {
 	ops := &fakeOperations{}
 	model := ready(t, ops)
-	model, refresh := update(t, model, refreshTick(time.Now()))
+	model, refresh := update(t, model, press("r"))
 	if !model.inventoryRefreshing || refresh == nil {
 		t.Fatalf("background refresh = refreshing %v cmd %v", model.inventoryRefreshing, refresh)
 	}
@@ -462,7 +461,7 @@ func TestInventoryRefreshKeepsReadyInteractionsAndCancelsOnNewEffect(t *testing.
 		return catalog.Inventory{Local: catalog.SourceResult{Err: ctx.Err()}, Sprites: catalog.SourceResult{Skipped: true}}
 	}
 	model := ready(t, ops)
-	model, refresh := update(t, model, refreshTick(time.Now()))
+	model, refresh := update(t, model, press("r"))
 	if model.phase != phaseReady || !model.inventoryRefreshing || !strings.Contains(model.View().Content, "Refreshing local") {
 		t.Fatalf("refresh blocked view = phase %v refreshing %v view %q", model.phase, model.inventoryRefreshing, model.View().Content)
 	}
@@ -895,24 +894,28 @@ func TestAttachFailureNoticeSurvivesAutomaticRefresh(t *testing.T) {
 	}
 }
 
-func TestSpriteDetailShowsSharedObservationAgeWithoutPolling(t *testing.T) {
+func TestSpriteDetailShowsLiveObservationAgeWithoutPolling(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	observed := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	now := observed
 	model := ready(t, ops)
-	model.now = func() time.Time { return observed }
+	model.now = func() time.Time { return now }
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
 	model, _ = update(t, model, runFirst(t, load))
-	model.now = func() time.Time { return observed.Add(65 * time.Second) }
+	if content := model.View().Content; !strings.Contains(content, "Herdr checked just now") {
+		t.Fatalf("initial detail observation line = %q", content)
+	}
 
+	calls := ops.listSpriteCalls.Load()
+	now = observed.Add(65 * time.Second)
+	model, cmd := update(t, model, clockTick(now))
+	if cmd == nil || model.phase != phaseReady || model.inventoryRefreshing || ops.listSpriteCalls.Load() != calls {
+		t.Fatalf("detail clock tick polled = phase %v refreshing %v calls %d→%d cmd %v", model.phase, model.inventoryRefreshing, calls, ops.listSpriteCalls.Load(), cmd)
+	}
 	content := model.View().Content
 	if strings.Count(content, "Herdr checked") != 1 || !strings.Contains(content, "Herdr checked 1m ago") {
-		t.Fatalf("detail observation line = %q", content)
-	}
-	calls := ops.listSpriteCalls.Load()
-	model, cmd := update(t, model, refreshTick(observed.Add(refreshInterval)))
-	if cmd == nil || model.phase != phaseReady || model.inventoryRefreshing || ops.listSpriteCalls.Load() != calls {
-		t.Fatalf("detail refresh tick polled = phase %v refreshing %v calls %d→%d cmd %v", model.phase, model.inventoryRefreshing, calls, ops.listSpriteCalls.Load(), cmd)
+		t.Fatalf("live detail observation line = %q", content)
 	}
 }
 
