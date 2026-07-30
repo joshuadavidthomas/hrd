@@ -120,7 +120,20 @@ func (m Model) breadcrumbSegments() []string {
 }
 
 func (m Model) bodyView(width, height int) string {
-	switch m.currentPhase() {
+	switch m.active {
+	case workflowHome:
+		return m.homeView(width, height)
+	case workflowSessions:
+		return m.sessionsView(width, height)
+	case workflowConnection:
+		return m.connectionView(width, height)
+	default:
+		panic("ui: invalid active workflow")
+	}
+}
+
+func (m Model) homeView(width, height int) string {
+	switch m.home.phase {
 	case phaseLoading:
 		return ""
 	case phaseInitialLoadFailed:
@@ -134,14 +147,33 @@ func (m Model) bodyView(width, height int) string {
 		}, "\n"), width, height)
 	case phaseCreatingSprite:
 		return m.busyLine("Creating "+m.nameInput.Value()+"…", width)
+	case phaseReady:
+		if len(m.browser.Items()) == 0 {
+			return "No local sessions or Sprite endpoints found."
+		}
+		return m.listView(width, height)
+	default:
+		panic("ui: invalid Home phase")
+	}
+}
+
+func (m Model) sessionsView(width, height int) string {
+	switch m.sessions.phase {
 	case phaseLoadingSprite:
 		return m.spriteSessionsLoadingView(width, height)
 	case phaseConfirmingSpriteInstall:
 		return titleStyle.Render("Install Herdr?")
 	case phaseInstallingSpriteHerdr:
 		return m.busyLine("Installing Herdr…", width)
-	case phaseRefreshingSprite:
+	case phaseRefreshingSprite, phaseReady:
 		return m.listView(width, height)
+	default:
+		panic("ui: invalid Sprite Sessions phase")
+	}
+}
+
+func (m Model) connectionView(width, height int) string {
+	switch m.connection.phase {
 	case phaseConfirmingStop:
 		action := "Stop"
 		if m.connection.restart {
@@ -186,16 +218,8 @@ func (m Model) bodyView(width, height int) string {
 			return m.listView(width, height)
 		}
 		return "Herdr has the terminal."
-	case phaseReady:
-		if m.showsSprite() {
-			return m.listView(width, height)
-		}
-		if len(m.browser.Items()) == 0 {
-			return "No local sessions or Sprite endpoints found."
-		}
-		return m.listView(width, height)
 	default:
-		return "Unknown UI state."
+		panic("ui: invalid Connection phase")
 	}
 }
 
@@ -545,32 +569,41 @@ func (m Model) helpView() string {
 	cancelTo := func(destination string) key.Binding {
 		return key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", destination))
 	}
-	switch m.currentPhase() {
-	case phaseNamingSprite:
-		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("home"), m.keys.force}
-	case phaseChoosingSpriteTransport:
-		short = []key.Binding{
-			key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")),
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "connect")),
-			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "sessions")),
-			m.keys.quit,
+	switch m.active {
+	case workflowHome:
+		switch m.home.phase {
+		case phaseNamingSprite:
+			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("home"), m.keys.force}
+		case phaseReady:
+			if m.browser.SettingFilter() {
+				short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
+				break
+			}
+			actions := make([]key.Binding, 0, 2)
+			if _, ok := m.selectedDestination(); ok && m.selectedCurrent() {
+				actions = append(actions, m.keys.enter)
+			}
+			if _, ok := m.operations.(spriteOperations); ok && m.home.spriteSnapshot.current && m.home.createBlock == "" {
+				actions = append(actions, m.keys.create)
+			}
+			navigation := []key.Binding{movement, filtering, m.keys.refresh, m.keys.quit, m.keys.help}
+			short = append([]key.Binding{movement}, actions...)
+			short = append(short, filtering, m.keys.refresh, m.keys.help)
+			full = [][]key.Binding{actions, navigation}
+		default:
+			short = []key.Binding{m.keys.quit}
 		}
-	case phasePreparing:
-		short = []key.Binding{m.keys.quit}
-	case phaseConfirmingSpriteInstall:
-		short = []key.Binding{m.keys.confirm, cancelTo("home"), m.keys.quit}
-	case phaseConfirmingStop:
-		short = []key.Binding{m.keys.confirm, cancelTo("sessions"), m.keys.quit}
-	case phaseConfirmingHostKey:
-		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "continue")), cancelTo("sessions"), m.keys.quit}
-	case phaseChoosingSSHKey:
-		short = []key.Binding{key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")), key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "use key")), escapeTo("sessions"), m.keys.quit}
-	case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
-		short = []key.Binding{escapeTo("home"), m.keys.force}
-	case phaseReady:
-		if m.browser.SettingFilter() {
-			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
-		} else if m.showsSprite() {
+	case workflowSessions:
+		switch m.sessions.phase {
+		case phaseConfirmingSpriteInstall:
+			short = []key.Binding{m.keys.confirm, cancelTo("home"), m.keys.quit}
+		case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
+			short = []key.Binding{escapeTo("home"), m.keys.force}
+		case phaseReady:
+			if m.browser.SettingFilter() {
+				short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
+				break
+			}
 			actions := make([]key.Binding, 0, 3)
 			if _, ok := m.selectedDestination(); ok && m.selectedCurrent() {
 				actions = append(actions, m.keys.enter)
@@ -583,21 +616,31 @@ func (m Model) helpView() string {
 			short = append(short, actions...)
 			short = append(short, filtering, m.keys.refresh, m.keys.help)
 			full = [][]key.Binding{actions, navigation}
-		} else {
-			actions := make([]key.Binding, 0, 2)
-			if _, ok := m.selectedDestination(); ok && m.selectedCurrent() {
-				actions = append(actions, m.keys.enter)
+		default:
+			short = []key.Binding{m.keys.quit}
+		}
+	case workflowConnection:
+		switch m.connection.phase {
+		case phaseChoosingSpriteTransport:
+			short = []key.Binding{
+				key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")),
+				key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "connect")),
+				escapeTo("sessions"),
+				m.keys.quit,
 			}
-			if _, ok := m.operations.(spriteOperations); ok && m.home.spriteSnapshot.current && m.home.createBlock == "" {
-				actions = append(actions, m.keys.create)
-			}
-			navigation := []key.Binding{movement, filtering, m.keys.refresh, m.keys.quit, m.keys.help}
-			short = append([]key.Binding{movement}, actions...)
-			short = append(short, filtering, m.keys.refresh, m.keys.help)
-			full = [][]key.Binding{actions, navigation}
+		case phasePreparing:
+			short = []key.Binding{m.keys.quit}
+		case phaseConfirmingStop:
+			short = []key.Binding{m.keys.confirm, cancelTo("sessions"), m.keys.quit}
+		case phaseConfirmingHostKey:
+			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "continue")), cancelTo("sessions"), m.keys.quit}
+		case phaseChoosingSSHKey:
+			short = []key.Binding{key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")), key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "use key")), escapeTo("sessions"), m.keys.quit}
+		default:
+			short = []key.Binding{m.keys.quit}
 		}
 	default:
-		short = []key.Binding{m.keys.quit}
+		panic("ui: invalid active workflow")
 	}
 	if m.help.ShowAll && len(full) > 0 {
 		return m.help.FullHelpView(full)

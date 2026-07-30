@@ -28,15 +28,23 @@ func (s *homeState) invalidateSprites() {
 	s.spriteSnapshot.current = false
 }
 
+type homeMessage interface {
+	homeMessage()
+}
+
 type inventoryDone struct {
 	opID      uint64
 	inventory catalog.Inventory
 }
 
+func (inventoryDone) homeMessage() {}
+
 type createDone struct {
 	opID   uint64
 	result spriteapi.CreateResult
 }
+
+func (createDone) homeMessage() {}
 
 type refreshTick time.Time
 
@@ -45,6 +53,17 @@ func scheduleRefresh() tea.Cmd {
 }
 
 // Update advances navigation and provider effects.
+func (m Model) updateHomeMessage(msg homeMessage) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case inventoryDone:
+		return m.updateInventoryDone(msg)
+	case createDone:
+		return m.updateCreateDone(msg)
+	default:
+		panic("ui: invalid Home message")
+	}
+}
+
 func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.home.phase {
 	case phaseNamingSprite:

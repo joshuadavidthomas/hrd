@@ -11,21 +11,32 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 )
 
+type connectionMessage interface {
+	connectionMessage()
+}
+
 type prepareDone struct {
 	opID     uint64
 	prepared catalog.PreparedAttach
 	err      error
 }
 
+func (prepareDone) connectionMessage()   {}
+func (m prepareDone) closeLateResource() { closePrepared(m.prepared) }
+
 type stopDone struct {
 	opID uint64
 	err  error
 }
 
+func (stopDone) connectionMessage() {}
+
 type attachDone struct {
 	opID uint64
 	err  error
 }
+
+func (attachDone) connectionMessage() {}
 
 type sshAddReady struct {
 	opID    uint64
@@ -33,10 +44,14 @@ type sshAddReady struct {
 	err     error
 }
 
+func (sshAddReady) connectionMessage() {}
+
 type sshAddDone struct {
 	opID uint64
 	err  error
 }
+
+func (sshAddDone) connectionMessage() {}
 
 type prepareOperation struct {
 	destination catalog.Destination
@@ -59,6 +74,23 @@ type connectionState struct {
 }
 
 // Model is hrd's Bubble Tea model.
+func (m Model) updateConnectionMessage(msg connectionMessage) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case prepareDone:
+		return m.updatePrepareDone(msg)
+	case stopDone:
+		return m.updateStopDone(msg)
+	case attachDone:
+		return m.updateAttachDone(msg)
+	case sshAddReady:
+		return m.updateSSHAddReady(msg)
+	case sshAddDone:
+		return m.updateSSHAddDone(msg)
+	default:
+		panic("ui: invalid Connection message")
+	}
+}
+
 func (m Model) updateConnectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.connection.phase {
 	case phaseChoosingSpriteTransport:

@@ -28,6 +28,10 @@ func (s *sessionsState) invalidate() {
 	s.spriteSnapshotDetail.current = false
 }
 
+type sessionsMessage interface {
+	sessionsMessage()
+}
+
 type spriteSessionsDone struct {
 	opID       uint64
 	endpointID catalog.DestinationID
@@ -35,9 +39,24 @@ type spriteSessionsDone struct {
 	err        error
 }
 
+func (spriteSessionsDone) sessionsMessage() {}
+
 type installSpriteHerdrDone struct {
 	opID uint64
 	err  error
+}
+
+func (installSpriteHerdrDone) sessionsMessage() {}
+
+func (m Model) updateSessionsMessage(msg sessionsMessage) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case spriteSessionsDone:
+		return m.updateSpriteSessionsDone(msg)
+	case installSpriteHerdrDone:
+		return m.updateInstallSpriteHerdrDone(msg)
+	default:
+		panic("ui: invalid Sprite Sessions message")
+	}
 }
 
 func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

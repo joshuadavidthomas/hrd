@@ -267,10 +267,14 @@ func (m *Model) setPhase(next phase) {
 	}
 }
 
+type lateResourceMessage interface {
+	closeLateResource()
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitting {
-		if done, ok := msg.(prepareDone); ok {
-			closePrepared(done.prepared)
+		if late, ok := msg.(lateResourceMessage); ok {
+			late.closeLateResource()
 		}
 		return m, nil
 	}
@@ -295,24 +299,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, scheduleRefresh())
 		return m, tea.Batch(cmds...)
-	case inventoryDone:
-		return m.updateInventoryDone(msg)
-	case spriteSessionsDone:
-		return m.updateSpriteSessionsDone(msg)
-	case installSpriteHerdrDone:
-		return m.updateInstallSpriteHerdrDone(msg)
-	case prepareDone:
-		return m.updatePrepareDone(msg)
-	case stopDone:
-		return m.updateStopDone(msg)
-	case createDone:
-		return m.updateCreateDone(msg)
-	case attachDone:
-		return m.updateAttachDone(msg)
-	case sshAddReady:
-		return m.updateSSHAddReady(msg)
-	case sshAddDone:
-		return m.updateSSHAddDone(msg)
+	case homeMessage:
+		return m.updateHomeMessage(msg)
+	case sessionsMessage:
+		return m.updateSessionsMessage(msg)
+	case connectionMessage:
+		return m.updateConnectionMessage(msg)
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	default:
