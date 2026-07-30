@@ -27,7 +27,7 @@ func TestPartialSourceFailureRetainsStaleRowsAndDisablesTheirActions(t *testing.
 	}
 	model := ready(t, ops)
 	model.browser.Select(2)
-	model.selectedID = selected(t, model).ID
+	model.home.endpointSelection = selected(t, model).ID
 	model, refresh := update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, refresh))
 	if !model.ready() || !model.home.localSnapshot.current || model.home.spriteSnapshot.current {

@@ -187,6 +187,52 @@ func TestRestartTransportCancelDoesNotStopAndPrepareFailureRefreshesWithNotice(t
 	}
 }
 
+func TestSSHRestartKeepsRecoveryAfterStopping(t *testing.T) {
+	selection := &sshagent.SelectionRequired{Source: "1Password", Identities: []sshagent.Identity{
+		{Fingerprint: "SHA256:work", Comment: "Work", Algorithm: "ssh-ed25519"},
+		{Fingerprint: "SHA256:personal", Comment: "Personal", Algorithm: "ssh-ed25519"},
+	}}
+
+	for _, tc := range []struct {
+		name       string
+		prepareErr error
+		wantPhase  connectionPhase
+	}{
+		{name: "key selection", prepareErr: selection, wantPhase: connectionChoosingSSHKey},
+		{name: "ssh-add", prepareErr: sshagent.ErrNoKeys, wantPhase: connectionStartingSSHAgent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+			ops.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
+				return nil, tc.prepareErr
+			}
+			model := spriteReady(t, ops)
+			model, _ = update(t, model, press("R"))
+			model, _ = update(t, model, press("y"))
+			model, _ = update(t, model, press("down"))
+			model, stop := update(t, model, press("enter"))
+			model, prepare := update(t, model, runFirst(t, stop))
+			model, recovery := update(t, model, runFirst(t, prepare))
+			if model.connection.phase != tc.wantPhase || !model.connection.restartStopped {
+				t.Fatalf("post-stop recovery = phase %v stopped %v cmd %v", model.connection.phase, model.connection.restartStopped, recovery)
+			}
+
+			if tc.wantPhase == connectionChoosingSSHKey {
+				model, recovery = update(t, model, press("esc"))
+			} else {
+				model, recovery = update(t, model, run(t, recovery))
+			}
+			if model.sessions.phase != sessionsRefreshing || model.connection.restartStopped || recovery == nil {
+				t.Fatalf("recovery exit = phase %v stopped %v cmd %v", model.sessions.phase, model.connection.restartStopped, recovery)
+			}
+			model, _ = update(t, model, runFirst(t, recovery))
+			if !model.ready() || !model.sessions.spriteSnapshotDetail.current {
+				t.Fatalf("reconciled recovery exit = active %v sessions phase %v", model.active, model.sessions.phase)
+			}
+		})
+	}
+}
+
 func TestAttachFailureNoticeSurvivesAutomaticRefresh(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

@@ -87,7 +87,6 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.notice = ""
-		m.selectedID = destination.ID
 		m.home.endpointSelection = destination.ID
 		if _, ok := destination.Endpoint.(catalog.SpriteEndpoint); ok {
 			selection, err := catalog.SelectSpriteEndpoint(destination)
@@ -152,7 +151,7 @@ func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
 	}
 	m.reconcileCreateBlock()
 	m.showHome(homeReady)
-	selected := m.selectedID
+	selected := m.home.endpointSelection
 	if m.home.selectSprite != "" {
 		for _, row := range m.home.destinations {
 			if endpoint, ok := row.Endpoint.(catalog.SpriteEndpoint); ok && endpoint.Name == m.home.selectSprite {

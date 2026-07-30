@@ -38,16 +38,9 @@ type sshAddDone struct {
 	err  error
 }
 
-type prepareOperation struct {
-	destination catalog.Destination
-	transport   catalog.SpriteTransport
-}
-
 type connectionState struct {
 	phase            connectionPhase
-	sprite           bool
 	destination      catalog.Destination
-	prepare          prepareOperation
 	prepared         catalog.PreparedAttach
 	restart          bool
 	restartStopped   bool
@@ -56,6 +49,11 @@ type connectionState struct {
 	sshKeySource     string
 	sshKeyChoices    []catalog.SSHIdentity
 	sshKeyCursor     int
+}
+
+func (c connectionState) isSprite() bool {
+	_, ok := c.destination.Endpoint.(catalog.SpriteEndpoint)
+	return ok
 }
 
 func (m Model) updateConnectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -134,7 +132,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 	m.cancelOperation()
 	if msg.err != nil {
 		closePrepared(msg.prepared)
-		if !m.connection.restartStopped && m.connection.sprite && m.connection.prepare.transport == catalog.SSHFallback {
+		if m.connection.isSprite() && m.connection.transport == catalog.SSHFallback {
 			if source, choices, ok := catalog.SSHKeyChoices(msg.err); ok {
 				m.showConnection(connectionChoosingSSHKey)
 				m.connection.sshKeySource = printable(source)
@@ -148,23 +146,11 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.notice = prepareFailureNotice(msg.err)
-		if m.connection.restartStopped {
-			m.connection.restartStopped = false
-			cmd := m.beginSpriteRefresh()
-			return m, cmd
-		}
-		m.showReady()
-		return m, nil
+		return m, m.finishConnectionAttempt()
 	}
 	if msg.prepared == nil {
 		m.notice = "Couldn’t prepare destination: no attachment was returned."
-		if m.connection.restartStopped {
-			m.connection.restartStopped = false
-			cmd := m.beginSpriteRefresh()
-			return m, cmd
-		}
-		m.showReady()
-		return m, nil
+		return m, m.finishConnectionAttempt()
 	}
 	m.connection.prepared = msg.prepared
 	switch prepared := msg.prepared.(type) {
@@ -180,13 +166,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 			closePrepared(m.connection.prepared)
 			m.connection.prepared = nil
 			m.notice = "Couldn’t prepare destination: no native command was returned."
-			if m.connection.restartStopped {
-				m.connection.restartStopped = false
-				cmd := m.beginSpriteRefresh()
-				return m, cmd
-			}
-			m.showReady()
-			return m, nil
+			return m, m.finishConnectionAttempt()
 		}
 		cmd := m.beginNativeAttach(prepared)
 		return m, cmd
@@ -194,13 +174,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 		closePrepared(m.connection.prepared)
 		m.connection.prepared = nil
 		m.notice = "Couldn’t prepare destination: unknown attachment type."
-		if m.connection.restartStopped {
-			m.connection.restartStopped = false
-			cmd := m.beginSpriteRefresh()
-			return m, cmd
-		}
-		m.showReady()
-		return m, nil
+		return m, m.finishConnectionAttempt()
 	}
 }
 
@@ -215,7 +189,7 @@ func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
 	} else {
 		m.notice = ""
 	}
-	if m.connection.sprite {
+	if m.connection.isSprite() {
 		m.connection.restartStopped = false
 		cmd := m.beginSpriteRefresh()
 		return m, cmd
@@ -234,8 +208,7 @@ func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
 			msg.err = fmt.Errorf("no ssh-add command")
 		}
 		m.notice = "Couldn’t start ssh-add: " + printable(msg.err.Error())
-		m.showReady()
-		return m, nil
+		return m, m.finishConnectionAttempt()
 	}
 	m.showConnection(connectionAddingSSHKey)
 	opID := msg.opID
@@ -248,8 +221,7 @@ func (m Model) updateSSHAddDone(msg sshAddDone) (tea.Model, tea.Cmd) {
 	}
 	if msg.err != nil {
 		m.notice = "ssh-add did not load a key: " + printable(msg.err.Error())
-		m.showReady()
-		return m, nil
+		return m, m.finishConnectionAttempt()
 	}
 	cmd := m.retrySpritePrepare()
 	return m, tea.Batch(cmd, m.spinner.Tick)
@@ -263,7 +235,7 @@ func (m Model) updateSSHKeyChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.connection.sshKeyCursor = min(max(0, len(m.connection.sshKeyChoices)-1), m.connection.sshKeyCursor+1)
 	case "esc":
 		m.connection.sshKeyChoices = nil
-		m.showReady()
+		return m, m.finishConnectionAttempt()
 	case "enter":
 		if m.connection.sshKeyCursor < 0 || m.connection.sshKeyCursor >= len(m.connection.sshKeyChoices) {
 			return m, nil
@@ -303,8 +275,7 @@ func (m *Model) beginStop(destination catalog.Destination) tea.Cmd {
 func (m *Model) beginPrepareLocal(destination catalog.Destination) tea.Cmd {
 	opID, ctx := m.beginOperation()
 	m.showConnection(connectionPreparing)
-	m.connection.sprite = false
-	m.connection.prepare = prepareOperation{destination: destination}
+	m.connection.destination = destination
 	operations := m.operations
 	return func() tea.Msg {
 		prepared, err := operations.Prepare(ctx, destination)
@@ -325,13 +296,12 @@ func (m *Model) startPrepareSprite(destination catalog.Destination, transport ca
 	selection, err := catalog.SelectSpriteSession(destination)
 	if err != nil {
 		m.notice = prepareFailureNotice(err)
-		m.showReady()
-		return nil
+		return m.finishConnectionAttempt()
 	}
 	opID, ctx := m.beginOperation()
 	m.showConnection(connectionPreparing)
-	m.connection.sprite = true
-	m.connection.prepare = prepareOperation{destination: destination, transport: transport}
+	m.connection.destination = destination
+	m.connection.transport = transport
 	return func() tea.Msg {
 		prepared, err := operations.PrepareSprite(ctx, selection, transport)
 		return prepareDone{opID: opID, prepared: prepared, err: err}
@@ -342,8 +312,7 @@ func (m *Model) beginSSHKeyRecovery() tea.Cmd {
 	operations, ok := m.operations.(spriteOperations)
 	if !ok {
 		m.notice = "Couldn’t start ssh-add."
-		m.showReady()
-		return nil
+		return m.finishConnectionAttempt()
 	}
 	m.connection.sshRecoveryTried = true
 	opID, ctx := m.beginOperation()
@@ -354,8 +323,17 @@ func (m *Model) beginSSHKeyRecovery() tea.Cmd {
 	}
 }
 
+func (m *Model) finishConnectionAttempt() tea.Cmd {
+	if m.connection.restartStopped {
+		m.connection.restartStopped = false
+		return m.beginSpriteRefresh()
+	}
+	m.showReady()
+	return nil
+}
+
 func (m *Model) retrySpritePrepare() tea.Cmd {
-	return m.startPrepareSprite(m.connection.prepare.destination, catalog.SSHFallback)
+	return m.startPrepareSprite(m.connection.destination, catalog.SSHFallback)
 }
 
 func (m *Model) beginAttach() tea.Cmd {
@@ -387,12 +365,12 @@ func (m *Model) beginNativeAttach(prepared catalog.PreparedNativeAttach) tea.Cmd
 }
 
 func (m *Model) invalidateSpriteAttachObservations() {
-	if !m.connection.sprite {
+	if !m.connection.isSprite() {
 		return
 	}
 	m.home.invalidateSprites()
 	m.sessions.invalidate()
-	m.syncSpriteItems(m.selectedID)
+	m.syncSpriteItems(m.sessions.selection)
 }
 
 func closePrepared(prepared catalog.PreparedAttach) {

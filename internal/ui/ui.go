@@ -97,7 +97,6 @@ type sourceSnapshot struct {
 }
 
 type operationState struct {
-	next   uint64
 	id     uint64
 	cancel context.CancelFunc
 }
@@ -149,8 +148,6 @@ type Model struct {
 	operation  operationState
 	initialCmd tea.Cmd
 	quitting   bool
-
-	selectedID catalog.DestinationID
 
 	notice        string
 	refreshNotice string
@@ -222,7 +219,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) showsSprite() bool {
-	return m.active == workflowSessions || (m.active == workflowConnection && m.connection.sprite)
+	return m.active == workflowSessions || (m.active == workflowConnection && m.connection.isSprite())
 }
 
 func (m *Model) showHome(next homePhase) {
@@ -356,8 +353,7 @@ func (m *Model) supersedeOperation() uint64 {
 	m.cancelOperation()
 	m.home.inventoryRefreshing = false
 	m.home.inventoryRefreshVisible = false
-	m.operation.next++
-	m.operation.id = m.operation.next
+	m.operation.id++
 	return m.operation.id
 }
 

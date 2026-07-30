@@ -11,17 +11,17 @@ import (
 
 type sessionsState struct {
 	phase                   sessionsPhase
+	selection               catalog.DestinationID
 	spriteEndpoint          catalog.Destination
 	spriteEndpointSelection catalog.SpriteEndpointSelection
-	spriteDetailEndpointID  catalog.DestinationID
 	spriteSnapshotDetail    sourceSnapshot
 }
 
 func (s *sessionsState) open(endpoint catalog.Destination, selection catalog.SpriteEndpointSelection) {
 	s.spriteEndpoint = endpoint
 	s.spriteEndpointSelection = selection
-	s.spriteDetailEndpointID = endpoint.ID
 	s.spriteSnapshotDetail = sourceSnapshot{}
+	s.selection = ""
 }
 
 func (s *sessionsState) invalidate() {
@@ -29,10 +29,9 @@ func (s *sessionsState) invalidate() {
 }
 
 type spriteSessionsDone struct {
-	opID       uint64
-	endpointID catalog.DestinationID
-	rows       []catalog.Destination
-	err        error
+	opID uint64
+	rows []catalog.Destination
+	err  error
 }
 
 type installSpriteHerdrDone struct {
@@ -64,7 +63,6 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if key.Matches(msg, m.keys.stop) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
-				m.connection.sprite = true
 				m.connection.destination = destination
 				m.connection.restart = false
 				m.showConnection(connectionConfirmingStop)
@@ -73,7 +71,6 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if key.Matches(msg, m.keys.restart) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
-				m.connection.sprite = true
 				m.connection.destination = destination
 				m.connection.restart = true
 				m.showConnection(connectionConfirmingStop)
@@ -86,8 +83,7 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.notice = ""
-			m.selectedID = destination.ID
-			m.connection.sprite = true
+			m.sessions.selection = destination.ID
 			m.connection.destination = destination
 			m.connection.restart = false
 			m.connection.transport = catalog.NativePreview
@@ -110,7 +106,7 @@ func (m Model) updateSpriteInstallConfirmation(msg tea.KeyPressMsg) (tea.Model, 
 }
 
 func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || msg.endpointID != m.sessions.spriteDetailEndpointID || (m.sessions.phase != sessionsLoading && m.sessions.phase != sessionsRefreshing) {
+	if msg.opID != m.operation.id || (m.sessions.phase != sessionsLoading && m.sessions.phase != sessionsRefreshing) {
 		return m, nil
 	}
 	initial := m.sessions.phase == sessionsLoading
@@ -130,7 +126,7 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 		m.refreshNotice = ""
 	}
 	m.showSessions(sessionsReady)
-	selected := m.selectedID
+	selected := m.sessions.selection
 	if initial {
 		selected = ""
 	}
@@ -159,11 +155,10 @@ func (m *Model) beginSpriteSessions() tea.Cmd {
 		return nil
 	}
 	opID, ctx := m.beginOperation()
-	endpointID := m.sessions.spriteDetailEndpointID
 	selection := m.sessions.spriteEndpointSelection
 	return func() tea.Msg {
 		rows, err := operations.ListSpriteSessions(ctx, selection)
-		return spriteSessionsDone{opID: opID, endpointID: endpointID, rows: append([]catalog.Destination(nil), rows...), err: err}
+		return spriteSessionsDone{opID: opID, rows: append([]catalog.Destination(nil), rows...), err: err}
 	}
 }
 

@@ -116,8 +116,8 @@ func (m Model) breadcrumbSegments() []string {
 				segments = append(segments, printable(m.connection.destination.Label))
 			}
 		case connectionPreparing, connectionConfirmingHostKey, connectionStartingSSHAgent, connectionAddingSSHKey, connectionChoosingSSHKey, connectionAttaching:
-			if m.connection.prepare.destination.Label != "" {
-				segments = append(segments, printable(m.connection.prepare.destination.Label))
+			if m.connection.destination.Label != "" {
+				segments = append(segments, printable(m.connection.destination.Label))
 			}
 		}
 	}
@@ -197,13 +197,13 @@ func (m Model) connectionView(width, height int) string {
 	case connectionChoosingTransport:
 		return fitView(m.transportView(width), width, height)
 	case connectionPreparing:
-		if m.connection.sprite {
-			if m.connection.prepare.transport == catalog.SSHFallback {
+		if m.connection.isSprite() {
+			if m.connection.transport == catalog.SSHFallback {
 				return m.busyLine("Setting up SSH on "+m.spriteName()+"… Up to three minutes.", width)
 			}
 			return fitView(m.transportView(width), width, height)
 		}
-		return m.busyLine("Preparing local session "+printable(m.connection.prepare.destination.Label)+"…", width)
+		return m.busyLine("Preparing local session "+printable(m.connection.destination.Label)+"…", width)
 	case connectionConfirmingHostKey:
 		prepared, _ := m.connection.prepared.(catalog.PreparedProcessAttach)
 		return fitView(strings.Join([]string{
@@ -219,7 +219,7 @@ func (m Model) connectionView(width, height int) string {
 	case connectionChoosingSSHKey:
 		return fitView(m.sshKeyView(width), width, height)
 	case connectionAttaching:
-		if m.connection.sprite && m.connection.prepare.transport == catalog.NativePreview {
+		if m.connection.isSprite() && m.connection.transport == catalog.NativePreview {
 			return m.listView(width, height)
 		}
 		return "Herdr has the terminal."
@@ -657,7 +657,7 @@ func (m Model) spriteName() string {
 	if endpoint, ok := m.sessions.spriteEndpoint.Endpoint.(catalog.SpriteEndpoint); ok {
 		return printable(endpoint.Name)
 	}
-	if endpoint, ok := m.connection.prepare.destination.Endpoint.(catalog.SpriteEndpoint); ok {
+	if endpoint, ok := m.connection.destination.Endpoint.(catalog.SpriteEndpoint); ok {
 		return printable(endpoint.Name)
 	}
 	return "Sprite"

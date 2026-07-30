@@ -89,7 +89,11 @@ func (m *Model) syncEndpointItems(selected catalog.DestinationID) {
 	}
 	m.replaceBrowserItems(items)
 	m.selectListID(selected)
-	m.home.endpointSelection = m.selectedID
+	if destination, ok := m.selectedDestination(); ok {
+		m.home.endpointSelection = destination.ID
+	} else {
+		m.home.endpointSelection = ""
+	}
 	m.resizeComponents()
 }
 
@@ -118,6 +122,11 @@ func (m *Model) syncSpriteItems(selected catalog.DestinationID) {
 	}
 	m.replaceBrowserItems(items)
 	m.selectListID(selected)
+	if destination, ok := m.selectedDestination(); ok {
+		m.sessions.selection = destination.ID
+	} else {
+		m.sessions.selection = ""
+	}
 	m.resizeComponents()
 }
 
@@ -148,17 +157,11 @@ func (m *Model) selectListID(id catalog.DestinationID) {
 		for index, raw := range m.browser.VisibleItems() {
 			if item, ok := raw.(browserItem); ok && item.destination.ID == id {
 				m.browser.Select(index)
-				m.selectedID = id
 				return
 			}
 		}
 	}
 	m.browser.Select(0)
-	if destination, ok := m.selectedDestination(); ok {
-		m.selectedID = destination.ID
-	} else {
-		m.selectedID = ""
-	}
 }
 
 func (m Model) destinationCurrent(destination catalog.Destination) bool {
@@ -214,9 +217,11 @@ func (m Model) updateBrowserKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.browser, cmd = m.browser.Update(msg)
 	m.refreshBrowserFilter(filterState, filterValue)
 	if destination, ok := m.selectedDestination(); ok {
-		m.selectedID = destination.ID
-		if m.active == workflowHome {
+		switch m.active {
+		case workflowHome:
 			m.home.endpointSelection = destination.ID
+		case workflowSessions:
+			m.sessions.selection = destination.ID
 		}
 	}
 	return m, cmd
