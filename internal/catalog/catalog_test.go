@@ -197,6 +197,20 @@ func TestPrepareRejectsTamperedDestination(t *testing.T) {
 	}
 }
 
+func TestLocalOperationsInventorySkipsSprites(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	inventory := catalog.NewLocalOperations(herdr.New()).Inventory(ctx)
+	if !inventory.Sprites.Skipped || inventory.Sprites.Err != nil || len(inventory.Sprites.Rows) != 0 {
+		t.Fatalf("Sprite source = %#v, want skipped", inventory.Sprites)
+	}
+	if !errors.Is(inventory.Local.Err, context.Canceled) {
+		t.Fatalf("local inventory error = %v, want context.Canceled", inventory.Local.Err)
+	}
+}
+
 func TestLocalOperationsPreparesAndObservesCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -228,7 +242,7 @@ func TestSpriteDestinationsKeepObservedLifecycleAndSeparateIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpriteDestinations() error = %v", err)
 	}
-	if rows[0].Label != "alpha" || rows[0].Session != "default" {
+	if rows[0].Label != "alpha" || rows[0].Session != "" {
 		t.Fatalf("rows = %#v", rows)
 	}
 	if status, ok := rows[0].Status.(catalog.SpriteStatus); !ok || status.Lifecycle != sprites.Running {
@@ -243,14 +257,73 @@ func TestSpriteDestinationsKeepObservedLifecycleAndSeparateIDs(t *testing.T) {
 	}
 }
 
+func TestSpriteSessionDestinationsObserveOnlyHerdrSessionState(t *testing.T) {
+	t.Parallel()
+
+	endpoints, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "alpha", State: sprites.Warm}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := catalog.SelectSpriteEndpoint(endpoints[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := []herdr.Session{
+		{Name: "default", Default: true, Running: true},
+		{Name: "work tree", Running: false},
+	}
+	rows, err := catalog.SpriteSessionDestinations(endpoint, sessions)
+	if err != nil {
+		t.Fatalf("SpriteSessionDestinations() error = %v", err)
+	}
+	if len(rows) != 2 || rows[0].Session != "default" || rows[1].Session != "work tree" {
+		t.Fatalf("rows = %#v", rows)
+	}
+	for i, row := range rows {
+		status, ok := row.Status.(catalog.SpriteSessionStatus)
+		if !ok {
+			t.Fatalf("row %d status = %T, want SpriteSessionStatus", i, row.Status)
+		}
+		if status.Running != sessions[i].Running {
+			t.Errorf("row %d status = %#v", i, status)
+		}
+	}
+	if got, want := endpoints[0].ID, catalog.DestinationID("v1:sprite:YWxwaGE"); got != want {
+		t.Fatalf("endpoint ID = %q, want %q", got, want)
+	}
+	if endpoints[0].ID == rows[0].ID || rows[0].ID == rows[1].ID {
+		t.Fatal("endpoint and session IDs must remain distinct")
+	}
+
+	sessions[0].Name = "changed"
+	if rows[0].Session != "default" {
+		t.Fatal("session rows retained the caller's slice")
+	}
+}
+
+func TestSpriteSessionDestinationsRejectInvalidSourceRows(t *testing.T) {
+	t.Parallel()
+
+	if _, err := catalog.SpriteSessionDestinations(catalog.SpriteEndpointSelection{}, nil); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("invalid Sprite error = %v", err)
+	}
+	endpoint := spriteEndpointSelection(t, "alpha", sprites.Unknown)
+	if _, err := catalog.SpriteSessionDestinations(endpoint, []herdr.Session{{Name: ""}}); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("empty session error = %v", err)
+	}
+	if _, err := catalog.SpriteSessionDestinations(endpoint, []herdr.Session{{Name: "same"}, {Name: "same"}}); !errors.Is(err, catalog.ErrDuplicateDestination) {
+		t.Fatalf("duplicate session error = %v", err)
+	}
+}
+
 func TestPrepareSpriteSSHUsesExactRemoteURI(t *testing.T) {
 	t.Parallel()
-	result, err := catalog.PrepareSpriteSSH("alpha", sprites.Prepared{Port: 41234, Fingerprint: "SHA256:test", SSHAuthSocket: "/tmp/hrd-agent.sock"})
+	result, err := catalog.PrepareSpriteSSH("alpha", "work", sprites.Prepared{Port: 41234, Fingerprint: "SHA256:test", SSHAuthSocket: "/tmp/hrd-agent.sock"})
 	if err != nil {
 		t.Fatalf("PrepareSpriteSSH() error = %v", err)
 	}
 	prepared := requireProcessAttach(t, result)
-	if got, want := prepared.HerdrArgs(), []string{"--remote", "ssh://sprite@127.0.0.1:41234"}; !reflect.DeepEqual(got, want) {
+	if got, want := prepared.HerdrArgs(), []string{"--remote", "ssh://sprite@127.0.0.1:41234", "--session", "work"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 	if prepared.SSHAuthSocket() != "/tmp/hrd-agent.sock" {
@@ -292,7 +365,7 @@ func TestPreparedVariantsRemainDistinct(t *testing.T) {
 		t.Fatal("native preparation is also a process preparation")
 	}
 
-	processResult, err := catalog.PrepareSpriteSSH("alpha", sprites.Prepared{Port: 22})
+	processResult, err := catalog.PrepareSpriteSSH("alpha", "work", sprites.Prepared{Port: 22})
 	if err != nil {
 		t.Fatalf("PrepareSpriteSSH() error = %v", err)
 	}
@@ -307,11 +380,14 @@ func TestPreparedVariantsRemainDistinct(t *testing.T) {
 func TestSpritePreparationRejectsInvalidVariantInputs(t *testing.T) {
 	t.Parallel()
 
-	if _, err := catalog.PrepareSpriteSSH("Bad Name", sprites.Prepared{Port: 22}); !errors.Is(err, catalog.ErrInvalidDestination) {
+	if _, err := catalog.PrepareSpriteSSH("Bad Name", "work", sprites.Prepared{Port: 22}); !errors.Is(err, catalog.ErrInvalidDestination) {
 		t.Fatalf("PrepareSpriteSSH(invalid name) error = %v, want ErrInvalidDestination", err)
 	}
-	if _, err := catalog.PrepareSpriteSSH("alpha", sprites.Prepared{}); !errors.Is(err, catalog.ErrInvalidDestination) {
+	if _, err := catalog.PrepareSpriteSSH("alpha", "work", sprites.Prepared{}); !errors.Is(err, catalog.ErrInvalidDestination) {
 		t.Fatalf("PrepareSpriteSSH(invalid port) error = %v, want ErrInvalidDestination", err)
+	}
+	if _, err := catalog.PrepareSpriteSSH("alpha", "", sprites.Prepared{Port: 22}); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("PrepareSpriteSSH(empty session) error = %v, want ErrInvalidDestination", err)
 	}
 }
 
@@ -326,9 +402,65 @@ func TestSpritePreparationRequiresExplicitValidTransport(t *testing.T) {
 	if _, err := operations.Prepare(context.Background(), rows[0]); !errors.Is(err, catalog.ErrInvalidDestination) {
 		t.Fatalf("Prepare(Sprite) error = %v, want ErrInvalidDestination", err)
 	}
-	if _, err := operations.PrepareSprite(context.Background(), "alpha", catalog.SpriteTransport(99)); !errors.Is(err, catalog.ErrInvalidDestination) {
+	endpoint, err := catalog.SelectSpriteEndpoint(rows[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := catalog.SpriteSessionDestinations(endpoint, []herdr.Session{{Name: "work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection, err := catalog.SelectSpriteSession(sessions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operations.PrepareSprite(context.Background(), selection, catalog.SpriteTransport(99)); !errors.Is(err, catalog.ErrInvalidDestination) {
 		t.Fatalf("PrepareSprite(invalid transport) error = %v, want ErrInvalidDestination", err)
 	}
+	if _, err := operations.PrepareSprite(context.Background(), catalog.SpriteSessionSelection{}, catalog.NativePreview); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("PrepareSprite(empty selection) error = %v, want ErrInvalidDestination", err)
+	}
+}
+
+func TestSpriteSelectionConversionsRejectWrongRowKinds(t *testing.T) {
+	t.Parallel()
+
+	endpoints, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "alpha", State: sprites.Running}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedEndpoint := endpoints[0]
+	tamperedEndpoint.Session = "work"
+	if _, err := catalog.SelectSpriteEndpoint(tamperedEndpoint); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("SelectSpriteEndpoint(tampered) error = %v, want ErrInvalidDestination", err)
+	}
+
+	endpoint, err := catalog.SelectSpriteEndpoint(endpoints[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := catalog.SpriteSessionDestinations(endpoint, []herdr.Session{{Name: "work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedSession := sessions[0]
+	tamperedSession.ID = endpoints[0].ID
+	if _, err := catalog.SelectSpriteSession(tamperedSession); !errors.Is(err, catalog.ErrInvalidDestination) {
+		t.Fatalf("SelectSpriteSession(tampered) error = %v, want ErrInvalidDestination", err)
+	}
+}
+
+func spriteEndpointSelection(t *testing.T, name string, state sprites.State) catalog.SpriteEndpointSelection {
+	t.Helper()
+	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: name, State: state}})
+	if err != nil {
+		t.Fatalf("SpriteDestinations() error = %v", err)
+	}
+	selection, err := catalog.SelectSpriteEndpoint(rows[0])
+	if err != nil {
+		t.Fatalf("SelectSpriteEndpoint() error = %v", err)
+	}
+	return selection
 }
 
 func requireProcessAttach(t *testing.T, result catalog.PreparedAttach) catalog.PreparedProcessAttach {

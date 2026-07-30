@@ -61,7 +61,7 @@ func TestValidateLaunchEnvironmentAcceptsAnOrdinaryTerminal(t *testing.T) {
 
 func TestUsageExplainsSpriteRequirements(t *testing.T) {
 	t.Parallel()
-	for _, want := range []string{"Usage:", "SPRITE_TOKEN", "Native", "default", "SSH fallback", "1Password", "enter", "attach"} {
+	for _, want := range []string{"Usage:", "SPRITE_TOKEN", "Native", "default", "SSH", "1Password", "enter", "session", "restart"} {
 		if !strings.Contains(usageText, want) {
 			t.Errorf("usage text does not contain %q", want)
 		}

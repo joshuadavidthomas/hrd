@@ -23,6 +23,8 @@ import (
 	"github.com/muesli/cancelreader"
 	sdk "github.com/superfly/sprites-go"
 	"golang.org/x/term"
+
+	"github.com/joshuadavidthomas/hrd/internal/herdr"
 )
 
 const (
@@ -31,19 +33,23 @@ const (
 	nativeShellEnvironment    = "SHELL=/bin/bash"
 	// Herdr publishes no checksum or signature manifest. HTTPS, redirects, the
 	// downloaded script, and the asset URLs it selects form the trust boundary.
-	nativeInstallURL   = "https://herdr.dev/install.sh"
-	nativeBaseURL      = "wss://api.sprites.dev"
-	nativeOutputMax    = 4096
-	cleanupTimeout     = 5 * time.Second
-	nativePingInterval = 15 * time.Second
-	nativeWriteTimeout = 10 * time.Second
+	nativeInstallURL          = "https://herdr.dev/install.sh"
+	nativeBaseURL             = "wss://api.sprites.dev"
+	nativeOutputMax           = 4096
+	herdrSessionListOutputMax = 1 << 20
+	herdrExecutableTimeout    = 5 * time.Second
+	herdrSessionListTimeout   = 10 * time.Second
+	herdrSessionStopTimeout   = 10 * time.Second
+	cleanupTimeout            = 5 * time.Second
+	nativePingInterval        = 15 * time.Second
+	nativeWriteTimeout        = 10 * time.Second
 )
 
 type nativeCommandSpec struct {
-	path          string
-	args          []string
-	env           []string
-	captureOutput bool
+	path        string
+	args        []string
+	env         []string
+	outputLimit int
 }
 
 type nativeCommandRunner interface {
@@ -58,8 +64,8 @@ func (r sdkNativeCommandRunner) Run(ctx context.Context, name string, spec nativ
 	cmd := r.client.Sprite(name).CommandContext(ctx, spec.path, spec.args...)
 	cmd.Env = spec.env
 	cmd.Stderr = ioDiscard{}
-	var output boundedBuffer
-	if spec.captureOutput {
+	output := boundedBuffer{limit: spec.outputLimit}
+	if spec.outputLimit > 0 {
 		cmd.Stdout = &output
 	} else {
 		cmd.Stdout = ioDiscard{}
@@ -72,36 +78,132 @@ func (r sdkNativeCommandRunner) Run(ctx context.Context, name string, spec nativ
 
 type boundedBuffer struct {
 	bytes.Buffer
+	limit int
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
-	remaining := nativeOutputMax - b.Len()
+	remaining := b.limit - b.Len()
 	if remaining <= 0 || len(p) > remaining {
 		return 0, errors.New("remote command output exceeded limit")
 	}
 	return b.Buffer.Write(p)
 }
 
-func (c *Client) PrepareNative(ctx context.Context, name string) (*NativeCommand, error) {
+// PrepareHerdr installs or verifies the fixed Herdr executable on a Sprite.
+func (c *Client) PrepareHerdr(ctx context.Context, name string) error {
+	if c == nil {
+		return errors.New("Sprite access is disabled")
+	}
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	if !c.beginNativePreparation() {
+		return context.Canceled
+	}
+	defer c.nativeWait.Done()
+	ctx, cancel := context.WithTimeout(ctx, prepareTimeout)
+	defer cancel()
+	return prepareNativeExecutable(ctx, c.commandRunner(), name)
+}
+
+// HerdrInstalled checks only whether the fixed Herdr executable is executable.
+func (c *Client) HerdrInstalled(ctx context.Context, name string) (bool, error) {
+	if c == nil {
+		return false, errors.New("Sprite access is disabled")
+	}
+	if err := ValidName(name); err != nil {
+		return false, err
+	}
+	return herdrInstalled(ctx, c.commandRunner(), name)
+}
+
+func herdrInstalled(ctx context.Context, runner nativeCommandRunner, name string) (bool, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, herdrExecutableTimeout)
+	defer cancel()
+	_, err := runner.Run(commandCtx, name, nativeCommandSpec{
+		path: "/usr/bin/test",
+		args: []string{"-x", nativeExecutable},
+	})
+	if ctxErr := commandCtx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	if err == nil {
+		return true, nil
+	}
+	if commandExitCode(err) == 1 {
+		return false, nil
+	}
+	return false, nativeStepError("check herdr executable", err)
+}
+
+// ListHerdrSessions runs Herdr's fixed JSON session inventory command on a Sprite.
+func (c *Client) ListHerdrSessions(ctx context.Context, name string) ([]herdr.Session, error) {
 	if c == nil {
 		return nil, errors.New("Sprite access is disabled")
 	}
 	if err := ValidName(name); err != nil {
 		return nil, err
 	}
-	if !c.beginNativePreparation() {
-		return nil, context.Canceled
-	}
-	defer c.nativeWait.Done()
-	ctx, cancel := context.WithTimeout(ctx, prepareTimeout)
+	commandCtx, cancel := context.WithTimeout(ctx, herdrSessionListTimeout)
 	defer cancel()
-
-	runner := c.nativeRunner
-	if runner == nil {
-		runner = sdkNativeCommandRunner{client: c.sdk}
+	output, err := c.commandRunner().Run(commandCtx, name, nativeCommandSpec{
+		path:        nativeExecutable,
+		args:        []string{"session", "list", "--json"},
+		outputLimit: herdrSessionListOutputMax,
+	})
+	if ctxErr := commandCtx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
-	if err := prepareNativeExecutable(ctx, runner, name); err != nil {
+	if err != nil {
+		return nil, nativeStepError("list Herdr sessions", err)
+	}
+	sessions, err := herdr.DecodeSessions([]byte(output))
+	if err != nil {
+		return nil, errors.New("list Herdr sessions returned invalid JSON")
+	}
+	return sessions, nil
+}
+
+// StopHerdrSession stops one named Herdr session through fixed remote argv.
+func (c *Client) StopHerdrSession(ctx context.Context, name, session string) error {
+	if c == nil {
+		return errors.New("sprite access is disabled")
+	}
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	if session == "" {
+		return errors.New("herdr session name must not be empty")
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, herdrSessionStopTimeout)
+	defer cancel()
+	_, err := c.commandRunner().Run(commandCtx, name, nativeCommandSpec{
+		path: nativeExecutable,
+		args: []string{"session", "stop", session, "--json"},
+	})
+	if ctxErr := commandCtx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		return nativeStepError("stop Herdr session", err)
+	}
+	return nil
+}
+
+// PrepareNative prepares an interactive Herdr attachment for one Sprite session.
+// Installing Herdr is a separate, explicit operation.
+func (c *Client) PrepareNative(ctx context.Context, name, session string) (*NativeCommand, error) {
+	if c == nil {
+		return nil, errors.New("sprite access is disabled")
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if err := ValidName(name); err != nil {
+		return nil, err
+	}
+	if session == "" {
+		return nil, errors.New("herdr session name must not be empty")
 	}
 
 	deps := c.nativeDeps
@@ -113,11 +215,19 @@ func (c *Client) PrepareNative(ctx context.Context, name string) (*NativeCommand
 		root = context.Background()
 	}
 	return &NativeCommand{
-		ctx:   root,
-		name:  name,
-		token: c.token,
-		deps:  deps,
+		ctx:     root,
+		name:    name,
+		session: session,
+		token:   c.token,
+		deps:    deps,
 	}, nil
+}
+
+func (c *Client) commandRunner() nativeCommandRunner {
+	if c.nativeRunner != nil {
+		return c.nativeRunner
+	}
+	return sdkNativeCommandRunner{client: c.sdk}
 }
 
 func (c *Client) beginNativePreparation() bool {
@@ -131,19 +241,15 @@ func (c *Client) beginNativePreparation() bool {
 }
 
 func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, name string) error {
-	check := nativeCommandSpec{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}}
-	_, err := runner.Run(ctx, name, check)
-	if err == nil {
+	installed, err := herdrInstalled(ctx, runner, name)
+	if err != nil {
+		return err
+	}
+	if installed {
 		return runNativeVersion(ctx, runner, name)
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if commandExitCode(err) != 1 {
-		return nativeStepError("check herdr executable", err)
-	}
 
-	output, err := runner.Run(ctx, name, nativeCommandSpec{path: "/usr/bin/mktemp", captureOutput: true})
+	output, err := runner.Run(ctx, name, nativeCommandSpec{path: "/usr/bin/mktemp", outputLimit: nativeOutputMax})
 	if err != nil {
 		return nativeStepErrorWithContext(ctx, "create installer temporary file", err)
 	}
@@ -323,13 +429,14 @@ func (nativeSystemSignals) Stop(ch chan<- os.Signal)   { signal.Stop(ch) }
 // NativeCommand is an interactive direct PTY command for herdr on a Sprite.
 // Its setters match Bubble Tea's ExecCommand interface without importing UI code.
 type NativeCommand struct {
-	ctx    context.Context
-	name   string
-	token  string
-	deps   nativeDependencies
-	stdin  io.Reader
-	stdout io.Writer
-	stderr io.Writer
+	ctx     context.Context
+	name    string
+	session string
+	token   string
+	deps    nativeDependencies
+	stdin   io.Reader
+	stdout  io.Writer
+	stderr  io.Writer
 }
 
 func (c *NativeCommand) SetStdin(stdin io.Reader)   { c.stdin = stdin }
@@ -366,7 +473,7 @@ func (c *NativeCommand) Run() (runErr error) {
 	}
 	defer func() { _ = reader.Close() }()
 
-	endpoint, err := buildNativeExecURL(c.deps.baseURL, c.name, cols, rows)
+	endpoint, err := buildNativeExecURL(c.deps.baseURL, c.name, c.session, cols, rows)
 	if err != nil {
 		return err
 	}
@@ -392,9 +499,12 @@ func validTerminalSize(cols, rows int) bool {
 	return cols > 0 && rows > 0 && cols <= math.MaxUint16 && rows <= math.MaxUint16
 }
 
-func buildNativeExecURL(baseURL, name string, cols, rows int) (string, error) {
+func buildNativeExecURL(baseURL, name, session string, cols, rows int) (string, error) {
 	if err := ValidName(name); err != nil {
 		return "", err
+	}
+	if session == "" {
+		return "", errors.New("herdr session name must not be empty")
 	}
 	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" || u.User != nil {
@@ -405,6 +515,8 @@ func buildNativeExecURL(baseURL, name string, cols, rows int) (string, error) {
 	u.Fragment = ""
 	query := make(url.Values)
 	query.Add("cmd", nativeExecutable)
+	query.Add("cmd", "--session")
+	query.Add("cmd", session)
 	query.Set("path", nativeExecutable)
 	query.Set("tty", "true")
 	query.Set("stdin", "true")

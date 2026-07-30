@@ -18,7 +18,7 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/sshagent"
 )
 
-// DestinationID identifies both the endpoint and session of a destination.
+// DestinationID identifies an endpoint row or one session on an endpoint.
 type DestinationID string
 
 // Endpoint identifies the machine that owns a Herdr server.
@@ -35,6 +35,19 @@ type SpriteEndpoint struct{ Name string }
 
 func (SpriteEndpoint) endpoint() {}
 
+// SpriteEndpointSelection is a validated top-level Sprite destination.
+// Its fields stay private so callers must cross the catalog validation seam.
+type SpriteEndpointSelection struct {
+	name string
+}
+
+// SpriteSessionSelection is a validated Herdr session on one Sprite.
+// Its fields stay private so endpoint and session identities cannot be mixed.
+type SpriteSessionSelection struct {
+	name    string
+	session string
+}
+
 // ObservedStatus is status obtained from a destination's source.
 type ObservedStatus interface {
 	observedStatus()
@@ -47,9 +60,17 @@ type LocalSessionStatus struct {
 
 func (LocalSessionStatus) observedStatus() {}
 
+// SpriteStatus reports provider lifecycle for a top-level Sprite endpoint.
 type SpriteStatus struct{ Lifecycle spriteapi.State }
 
 func (SpriteStatus) observedStatus() {}
+
+// SpriteSessionStatus reports whether Herdr observed a Sprite session as running.
+type SpriteSessionStatus struct {
+	Running bool
+}
+
+func (SpriteSessionStatus) observedStatus() {}
 
 // Destination is an endpoint plus a Herdr session.
 type Destination struct {
@@ -131,10 +152,20 @@ var (
 	ErrInvalidDestination = errors.New("invalid destination")
 	// ErrDuplicateDestination means two source rows produced the same identity.
 	ErrDuplicateDestination = errors.New("duplicate destination")
+	// ErrSpriteHerdrMissing means the selected Sprite does not have the fixed
+	// Herdr executable. Installing it requires an explicit operation.
+	ErrSpriteHerdrMissing = SpriteHerdrMissingError{}
 )
 
-// LocalOperations provides the UI's list and preparation operations from a
-// Herdr client.
+// SpriteHerdrMissingError is the typed missing-Herdr result at the catalog seam.
+type SpriteHerdrMissingError struct{}
+
+func (SpriteHerdrMissingError) Error() string {
+	return "Herdr is not installed on the selected Sprite"
+}
+
+// LocalOperations provides the UI's inventory and preparation operations from
+// a Herdr client.
 type LocalOperations struct {
 	herdr *herdr.Client
 }
@@ -147,13 +178,18 @@ func NewLocalOperations(client *herdr.Client) *LocalOperations {
 	return &LocalOperations{herdr: client}
 }
 
-// List returns the complete local destination inventory.
-func (o *LocalOperations) List(ctx context.Context) ([]Destination, error) {
+// Inventory returns the local result and marks the unavailable Sprite source
+// as skipped.
+func (o *LocalOperations) Inventory(ctx context.Context) Inventory {
 	sessions, err := o.herdr.ListSessions(ctx)
-	if err != nil {
-		return nil, err
+	var rows []Destination
+	if err == nil {
+		rows, err = LocalDestinations(sessions)
 	}
-	return LocalDestinations(sessions)
+	return Inventory{
+		Local:   SourceResult{Rows: rows, Err: err},
+		Sprites: SourceResult{Skipped: true},
+	}
 }
 
 // Prepare validates a selected destination and returns fixed Herdr arguments.
@@ -221,9 +257,15 @@ func localDestinationID(session string) DestinationID {
 	return DestinationID("v1:local::" + base64.RawURLEncoding.EncodeToString([]byte(session)))
 }
 func spriteDestinationID(name string) DestinationID {
-	return DestinationID("v1:sprite:" + base64.RawURLEncoding.EncodeToString([]byte(name)) + ":default")
+	return DestinationID("v1:sprite:" + base64.RawURLEncoding.EncodeToString([]byte(name)))
 }
 
+func spriteSessionDestinationID(name, session string) DestinationID {
+	return DestinationID(string(spriteDestinationID(name)) + ":" + base64.RawURLEncoding.EncodeToString([]byte(session)))
+}
+
+// SpriteDestinations translates provider inventory into endpoint rows. Session
+// selection happens only after Herdr inventory has been read from that Sprite.
 func SpriteDestinations(records []spriteapi.Sprite) ([]Destination, error) {
 	rows := make([]Destination, 0, len(records))
 	seen := map[DestinationID]struct{}{}
@@ -236,27 +278,73 @@ func SpriteDestinations(records []spriteapi.Sprite) ([]Destination, error) {
 			return nil, fmt.Errorf("%w: %q", ErrDuplicateDestination, id)
 		}
 		seen[id] = struct{}{}
-		rows = append(rows, Destination{ID: id, Endpoint: SpriteEndpoint{Name: record.Name}, Session: "default", Label: record.Name, Status: SpriteStatus{Lifecycle: record.State}})
+		rows = append(rows, Destination{ID: id, Endpoint: SpriteEndpoint{Name: record.Name}, Label: record.Name, Status: SpriteStatus{Lifecycle: record.State}})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Label < rows[j].Label })
 	return rows, nil
 }
-func PrepareSpriteSSH(name string, prepared spriteapi.Prepared) (PreparedAttach, error) {
-	if spriteapi.ValidName(name) != nil || prepared.Port <= 0 {
+
+// SpriteSessionDestinations translates validated remote Herdr sessions into
+// session rows under one selected Sprite endpoint.
+func SpriteSessionDestinations(endpoint SpriteEndpointSelection, sessions []herdr.Session) ([]Destination, error) {
+	if err := endpoint.validate(); err != nil {
+		return nil, err
+	}
+	rows := make([]Destination, 0, len(sessions))
+	seen := make(map[DestinationID]struct{}, len(sessions))
+	for i, session := range sessions {
+		if session.Name == "" {
+			return nil, fmt.Errorf("%w: Sprite session %d has an empty name", ErrInvalidDestination, i)
+		}
+		if session.Default != (session.Name == "default") {
+			return nil, fmt.Errorf("%w: Sprite session %q has inconsistent default status", ErrInvalidDestination, session.Name)
+		}
+		id := spriteSessionDestinationID(endpoint.name, session.Name)
+		if _, exists := seen[id]; exists {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicateDestination, id)
+		}
+		seen[id] = struct{}{}
+		rows = append(rows, Destination{
+			ID:       id,
+			Endpoint: SpriteEndpoint{Name: endpoint.name},
+			Session:  session.Name,
+			Label:    session.Name,
+			Status:   SpriteSessionStatus{Running: session.Running},
+		})
+	}
+	return rows, nil
+}
+
+func PrepareSpriteSSH(name, session string, prepared spriteapi.Prepared) (PreparedAttach, error) {
+	if spriteapi.ValidName(name) != nil || session == "" || prepared.Port <= 0 {
 		_ = prepared.Close()
 		return nil, fmt.Errorf("%w: invalid Sprite SSH preparation", ErrInvalidDestination)
 	}
 	target := (&url.URL{Scheme: "ssh", User: url.User("sprite"), Host: fmt.Sprintf("127.0.0.1:%d", prepared.Port)}).String()
-	return PreparedProcessAttach{herdrArgs: []string{"--remote", target}, sshAuthSocket: prepared.SSHAuthSocket, Fingerprint: prepared.Fingerprint, close: &attachCloseState{fn: prepared.Close}}, nil
+	return PreparedProcessAttach{herdrArgs: []string{"--remote", target, "--session", session}, sshAuthSocket: prepared.SSHAuthSocket, Fingerprint: prepared.Fingerprint, close: &attachCloseState{fn: prepared.Close}}, nil
+}
+
+type spriteOperationBackend interface {
+	HerdrInstalled(context.Context, string) (bool, error)
+	PrepareHerdr(context.Context, string) error
+	ListHerdrSessions(context.Context, string) ([]herdr.Session, error)
+	StopHerdrSession(context.Context, string, string) error
+	PrepareNative(context.Context, string, string) (*spriteapi.NativeCommand, error)
+	PrepareSSH(context.Context, string) (spriteapi.Prepared, error)
 }
 
 type SpriteOperations struct {
-	local   *LocalOperations
-	sprites *spriteapi.Client
+	local      *LocalOperations
+	sprites    *spriteapi.Client
+	operations spriteOperationBackend
 }
 
 func NewSpriteOperations(local *herdr.Client, sprites *spriteapi.Client) *SpriteOperations {
-	return &SpriteOperations{local: NewLocalOperations(local), sprites: sprites}
+	var operations spriteOperationBackend
+	if sprites != nil {
+		operations = sprites
+	}
+	return &SpriteOperations{local: NewLocalOperations(local), sprites: sprites, operations: operations}
 }
 
 type SourceResult struct {
@@ -273,7 +361,10 @@ func (o *SpriteOperations) Inventory(ctx context.Context) Inventory {
 	var result Inventory
 	var wait sync.WaitGroup
 	wait.Add(1)
-	go func() { defer wait.Done(); result.Local.Rows, result.Local.Err = o.local.List(ctx) }()
+	go func() {
+		defer wait.Done()
+		result.Local = o.local.Inventory(ctx).Local
+	}()
 	if o.sprites == nil {
 		result.Sprites.Skipped = true
 	} else {
@@ -290,14 +381,6 @@ func (o *SpriteOperations) Inventory(ctx context.Context) Inventory {
 	}
 	wait.Wait()
 	return result
-}
-func (o *SpriteOperations) List(ctx context.Context) ([]Destination, error) {
-	inventory := o.Inventory(ctx)
-	rows := append(append([]Destination(nil), inventory.Local.Rows...), inventory.Sprites.Rows...)
-	if inventory.Local.Err != nil && inventory.Sprites.Err != nil {
-		return nil, fmt.Errorf("local: %w; Sprites: %v", inventory.Local.Err, inventory.Sprites.Err)
-	}
-	return rows, nil
 }
 func (o *SpriteOperations) Prepare(ctx context.Context, destination Destination) (PreparedAttach, error) {
 	switch destination.Endpoint.(type) {
@@ -319,6 +402,99 @@ func (o *SpriteOperations) SSHAddCommand(ctx context.Context) (*exec.Cmd, error)
 
 func (o *SpriteOperations) SelectSSHKey(fingerprint string) error {
 	return o.sprites.SelectSSHKey(fingerprint)
+}
+
+// SelectSpriteEndpoint validates list rendering data as a top-level Sprite
+// selection. All Sprite endpoint operations accept only the returned value.
+func SelectSpriteEndpoint(destination Destination) (SpriteEndpointSelection, error) {
+	endpoint, endpointOK := destination.Endpoint.(SpriteEndpoint)
+	_, statusOK := destination.Status.(SpriteStatus)
+	selection := SpriteEndpointSelection{name: endpoint.Name}
+	if !endpointOK || !statusOK || destination.Session != "" || destination.ID != spriteDestinationID(endpoint.Name) || selection.validate() != nil {
+		return SpriteEndpointSelection{}, fmt.Errorf("%w: invalid Sprite endpoint", ErrInvalidDestination)
+	}
+	return selection, nil
+}
+
+// SelectSpriteSession validates list rendering data as one Sprite session.
+// Stop and attachment operations accept only the returned value.
+func SelectSpriteSession(destination Destination) (SpriteSessionSelection, error) {
+	endpoint, endpointOK := destination.Endpoint.(SpriteEndpoint)
+	_, statusOK := destination.Status.(SpriteSessionStatus)
+	selection := SpriteSessionSelection{name: endpoint.Name, session: destination.Session}
+	if !endpointOK || !statusOK || destination.ID != spriteSessionDestinationID(endpoint.Name, destination.Session) || selection.validate() != nil {
+		return SpriteSessionSelection{}, fmt.Errorf("%w: invalid Sprite session", ErrInvalidDestination)
+	}
+	return selection, nil
+}
+
+func (s SpriteEndpointSelection) validate() error {
+	if spriteapi.ValidName(s.name) != nil {
+		return fmt.Errorf("%w: invalid Sprite endpoint selection", ErrInvalidDestination)
+	}
+	return nil
+}
+
+func (s SpriteSessionSelection) validate() error {
+	if spriteapi.ValidName(s.name) != nil || s.session == "" {
+		return fmt.Errorf("%w: invalid Sprite session selection", ErrInvalidDestination)
+	}
+	return nil
+}
+
+func (o *SpriteOperations) operationBackend() (spriteOperationBackend, error) {
+	if o.operations == nil {
+		return nil, errors.New("sprite access is disabled")
+	}
+	return o.operations, nil
+}
+
+// ListSpriteSessions checks for the fixed Herdr executable, then lists its
+// sessions. It never installs Herdr.
+func (o *SpriteOperations) ListSpriteSessions(ctx context.Context, endpoint SpriteEndpointSelection) ([]Destination, error) {
+	if err := endpoint.validate(); err != nil {
+		return nil, err
+	}
+	backend, err := o.operationBackend()
+	if err != nil {
+		return nil, err
+	}
+	installed, err := backend.HerdrInstalled(ctx, endpoint.name)
+	if err != nil {
+		return nil, err
+	}
+	if !installed {
+		return nil, ErrSpriteHerdrMissing
+	}
+	sessions, err := backend.ListHerdrSessions(ctx, endpoint.name)
+	if err != nil {
+		return nil, err
+	}
+	return SpriteSessionDestinations(endpoint, sessions)
+}
+
+// InstallSpriteHerdr explicitly runs the Herdr preparation and installer flow.
+func (o *SpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint SpriteEndpointSelection) error {
+	if err := endpoint.validate(); err != nil {
+		return err
+	}
+	backend, err := o.operationBackend()
+	if err != nil {
+		return err
+	}
+	return backend.PrepareHerdr(ctx, endpoint.name)
+}
+
+// StopSpriteSession stops the selected remote Herdr session.
+func (o *SpriteOperations) StopSpriteSession(ctx context.Context, selection SpriteSessionSelection) error {
+	if err := selection.validate(); err != nil {
+		return err
+	}
+	backend, err := o.operationBackend()
+	if err != nil {
+		return err
+	}
+	return backend.StopHerdrSession(ctx, selection.name, selection.session)
 }
 
 // SSHIdentity is safe public metadata rendered by the key picker.
@@ -343,13 +519,21 @@ func SSHKeyChoices(err error) (string, []SSHIdentity, bool) {
 // NeedsSSHKey reports the one pre-effect failure that hrd can repair with
 // plain ssh-add before retrying the pending operation.
 func NeedsSSHKey(err error) bool { return sshagent.KeyRequired(err) }
-func (o *SpriteOperations) PrepareSprite(ctx context.Context, name string, transport SpriteTransport) (PreparedAttach, error) {
-	if err := spriteapi.ValidName(name); err != nil {
-		return nil, fmt.Errorf("%w: invalid Sprite name", ErrInvalidDestination)
+
+func (o *SpriteOperations) PrepareSprite(ctx context.Context, selection SpriteSessionSelection, transport SpriteTransport) (PreparedAttach, error) {
+	if err := selection.validate(); err != nil {
+		return nil, err
+	}
+	if transport != NativePreview && transport != SSHFallback {
+		return nil, fmt.Errorf("%w: unsupported Sprite transport", ErrInvalidDestination)
+	}
+	backend, err := o.operationBackend()
+	if err != nil {
+		return nil, err
 	}
 	switch transport {
 	case NativePreview:
-		command, err := o.sprites.PrepareNative(ctx, name)
+		command, err := backend.PrepareNative(ctx, selection.name, selection.session)
 		if err != nil {
 			return nil, err
 		}
@@ -358,12 +542,11 @@ func (o *SpriteOperations) PrepareSprite(ctx context.Context, name string, trans
 		}
 		return PreparedNativeAttach{Command: command}, nil
 	case SSHFallback:
-		prepared, err := o.sprites.PrepareSSH(ctx, name)
+		prepared, err := backend.PrepareSSH(ctx, selection.name)
 		if err != nil {
 			return nil, err
 		}
-		return PrepareSpriteSSH(name, prepared)
-	default:
-		return nil, fmt.Errorf("%w: unsupported Sprite transport", ErrInvalidDestination)
+		return PrepareSpriteSSH(selection.name, selection.session, prepared)
 	}
+	panic("unreachable Sprite transport")
 }

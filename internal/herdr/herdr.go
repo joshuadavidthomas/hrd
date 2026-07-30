@@ -1,4 +1,4 @@
-// Package herdr reads Herdr's machine-readable local session inventory.
+// Package herdr decodes Herdr's machine-readable session inventory and reads it locally.
 package herdr
 
 import (
@@ -124,7 +124,7 @@ func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
 		return nil, &ListError{Kind: ListErrorMalformed, Detail: err.Error(), cause: err}
 	}
 
-	sessions, err := decodeSessions(result.stdout)
+	sessions, err := DecodeSessions(result.stdout)
 	if err != nil {
 		return nil, &ListError{
 			Kind:   ListErrorMalformed,
@@ -205,7 +205,9 @@ type wireSession struct {
 	SessionDir string `json:"session_dir"`
 }
 
-func decodeSessions(data []byte) ([]Session, error) {
+// DecodeSessions decodes and validates Herdr's session list JSON envelope.
+// Local and remote transports share this strict wire contract.
+func DecodeSessions(data []byte) ([]Session, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var envelope sessionEnvelope
 	if err := decoder.Decode(&envelope); err != nil {

@@ -61,6 +61,22 @@ func TestListSessionsTranslatesDocumentedEnvelope(t *testing.T) {
 	}
 }
 
+func TestDecodeSessionsIsTheSharedStrictDecoder(t *testing.T) {
+	t.Parallel()
+
+	got, err := DecodeSessions([]byte(`{"sessions":[{"name":"work","default":false,"running":true}]}`))
+	if err != nil {
+		t.Fatalf("DecodeSessions() error = %v", err)
+	}
+	want := []Session{{Name: "work", Running: true}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DecodeSessions() = %#v, want %#v", got, want)
+	}
+	if _, err := DecodeSessions([]byte(`{"sessions":[{"name":"work","default":false}]}`)); err == nil {
+		t.Fatal("DecodeSessions() accepted a session without running status")
+	}
+}
+
 func TestListSessionsAllowsEmptyInventory(t *testing.T) {
 	t.Parallel()
 

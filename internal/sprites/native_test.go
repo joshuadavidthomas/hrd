@@ -17,6 +17,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/muesli/cancelreader"
+
+	"github.com/joshuadavidthomas/hrd/internal/herdr"
 )
 
 type fakeExitError int
@@ -56,15 +58,213 @@ func (r *fakeNativeRunner) specs() []nativeCommandSpec {
 	return result
 }
 
-func TestPrepareNativeExistingExecutableSkipsInstall(t *testing.T) {
+func TestHerdrInstalledUsesOnlyFixedExecutableCheck(t *testing.T) {
+	runner := &fakeNativeRunner{run: func(_ context.Context, _ nativeCommandSpec, _ int) (string, error) {
+		return "", fakeExitError(1)
+	}}
+	installed, err := nativePreparationClient(t, runner).HerdrInstalled(context.Background(), "sprite-one")
+	if err != nil {
+		t.Fatalf("HerdrInstalled() error = %v", err)
+	}
+	if installed {
+		t.Fatal("HerdrInstalled() = true for exit code 1")
+	}
+	want := []nativeCommandSpec{{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}}}
+	if got := runner.specs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoteHerdrOperationsOwnDeadlines(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		run     func(*Client) error
+	}{
+		{name: "executable check", timeout: herdrExecutableTimeout, run: func(client *Client) error {
+			_, err := client.HerdrInstalled(context.Background(), "sprite-one")
+			return err
+		}},
+		{name: "session list", timeout: herdrSessionListTimeout, run: func(client *Client) error {
+			_, err := client.ListHerdrSessions(context.Background(), "sprite-one")
+			return err
+		}},
+		{name: "session stop", timeout: herdrSessionStopTimeout, run: func(client *Client) error {
+			return client.StopHerdrSession(context.Background(), "sprite-one", "work")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var remaining time.Duration
+			runner := &fakeNativeRunner{run: func(ctx context.Context, spec nativeCommandSpec, _ int) (string, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					t.Fatal("runner context has no deadline")
+				}
+				remaining = time.Until(deadline)
+				if spec.path == nativeExecutable && reflect.DeepEqual(spec.args, []string{"session", "list", "--json"}) {
+					return `{"sessions":[]}`, nil
+				}
+				return "", nil
+			}}
+			if err := test.run(nativePreparationClient(t, runner)); err != nil {
+				t.Fatalf("operation error = %v", err)
+			}
+			if remaining <= 0 || remaining > test.timeout {
+				t.Fatalf("runner deadline = %v, want within (0, %v]", remaining, test.timeout)
+			}
+		})
+	}
+}
+
+func TestRemoteHerdrOperationsPreserveCallerCancellation(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, *Client) error
+	}{
+		{name: "executable check", run: func(ctx context.Context, client *Client) error {
+			_, err := client.HerdrInstalled(ctx, "sprite-one")
+			return err
+		}},
+		{name: "session list", run: func(ctx context.Context, client *Client) error {
+			_, err := client.ListHerdrSessions(ctx, "sprite-one")
+			return err
+		}},
+		{name: "session stop", run: func(ctx context.Context, client *Client) error {
+			return client.StopHerdrSession(ctx, "sprite-one", "work")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			runner := &fakeNativeRunner{run: func(commandCtx context.Context, spec nativeCommandSpec, _ int) (string, error) {
+				if !errors.Is(commandCtx.Err(), context.Canceled) {
+					t.Fatalf("runner context error = %v, want context.Canceled", commandCtx.Err())
+				}
+				if spec.path == nativeExecutable && reflect.DeepEqual(spec.args, []string{"session", "list", "--json"}) {
+					return `{"sessions":[]}`, nil
+				}
+				return "", nil
+			}}
+			err := test.run(ctx, nativePreparationClient(t, runner))
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("operation error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestListHerdrSessionsUsesFixedBoundedCommandAndSharedDecoder(t *testing.T) {
+	runner := &fakeNativeRunner{run: func(_ context.Context, _ nativeCommandSpec, _ int) (string, error) {
+		return `{"sessions":[{"name":"default","default":true,"running":true}]}`, nil
+	}}
+	client := nativePreparationClient(t, runner)
+
+	sessions, err := client.ListHerdrSessions(context.Background(), "sprite-one")
+	if err != nil {
+		t.Fatalf("ListHerdrSessions() error = %v", err)
+	}
+	if want := []herdr.Session{{Name: "default", Default: true, Running: true}}; !reflect.DeepEqual(sessions, want) {
+		t.Fatalf("ListHerdrSessions() = %#v, want %#v", sessions, want)
+	}
+	want := []nativeCommandSpec{{path: nativeExecutable, args: []string{"session", "list", "--json"}, outputLimit: 1 << 20}}
+	if got := runner.specs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoteHerdrSessionFailuresAreSanitized(t *testing.T) {
+	const secret = "provider-secret-token"
+	t.Run("executable check", func(t *testing.T) {
+		runner := &fakeNativeRunner{run: func(context.Context, nativeCommandSpec, int) (string, error) {
+			return "", errors.New("failed with " + secret)
+		}}
+		_, err := nativePreparationClient(t, runner).HerdrInstalled(context.Background(), "sprite-one")
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("HerdrInstalled() error = %v, want sanitized failure", err)
+		}
+	})
+	t.Run("list command", func(t *testing.T) {
+		runner := &fakeNativeRunner{run: func(context.Context, nativeCommandSpec, int) (string, error) {
+			return "", errors.New("failed with " + secret)
+		}}
+		_, err := nativePreparationClient(t, runner).ListHerdrSessions(context.Background(), "sprite-one")
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("ListHerdrSessions() error = %v, want sanitized failure", err)
+		}
+	})
+	t.Run("malformed list", func(t *testing.T) {
+		runner := &fakeNativeRunner{run: func(context.Context, nativeCommandSpec, int) (string, error) {
+			return `{"sessions":[{"name":"` + secret, nil
+		}}
+		_, err := nativePreparationClient(t, runner).ListHerdrSessions(context.Background(), "sprite-one")
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("ListHerdrSessions() error = %v, want sanitized decode failure", err)
+		}
+	})
+	t.Run("stop command", func(t *testing.T) {
+		runner := &fakeNativeRunner{run: func(context.Context, nativeCommandSpec, int) (string, error) {
+			return "", errors.New("failed with " + secret)
+		}}
+		err := nativePreparationClient(t, runner).StopHerdrSession(context.Background(), "sprite-one", "work")
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("StopHerdrSession() error = %v, want sanitized failure", err)
+		}
+	})
+}
+
+func TestStopHerdrSessionUsesFixedArgumentsAndValidatesInputs(t *testing.T) {
 	runner := &fakeNativeRunner{}
 	client := nativePreparationClient(t, runner)
-	command, err := client.PrepareNative(context.Background(), "sprite-one")
+	if err := client.StopHerdrSession(context.Background(), "sprite-one", "work tree"); err != nil {
+		t.Fatalf("StopHerdrSession() error = %v", err)
+	}
+	want := []nativeCommandSpec{{path: nativeExecutable, args: []string{"session", "stop", "work tree", "--json"}}}
+	if got := runner.specs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+	if err := client.StopHerdrSession(context.Background(), "sprite-one", ""); err == nil {
+		t.Fatal("StopHerdrSession() accepted an empty session")
+	}
+	if err := client.StopHerdrSession(context.Background(), "Bad Name", "work"); err == nil {
+		t.Fatal("StopHerdrSession() accepted an invalid Sprite name")
+	}
+	if got := runner.specs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("validation ran commands: %#v", got)
+	}
+}
+
+func TestPrepareNativeRequiresSessionBeforeRemoteEffects(t *testing.T) {
+	runner := &fakeNativeRunner{}
+	client := nativePreparationClient(t, runner)
+	if _, err := client.PrepareNative(context.Background(), "sprite-one", ""); err == nil {
+		t.Fatal("PrepareNative() accepted an empty session")
+	}
+	if got := runner.specs(); len(got) != 0 {
+		t.Fatalf("PrepareNative() commands = %#v, want none", got)
+	}
+}
+
+func TestPrepareNativeHasNoRemotePreparationEffects(t *testing.T) {
+	runner := &fakeNativeRunner{}
+	client := nativePreparationClient(t, runner)
+	command, err := client.PrepareNative(context.Background(), "sprite-one", "work")
 	if err != nil {
 		t.Fatalf("PrepareNative() error = %v", err)
 	}
 	if command == nil {
 		t.Fatal("PrepareNative() returned nil command")
+	}
+	if got := runner.specs(); len(got) != 0 {
+		t.Fatalf("commands = %#v, want none", got)
+	}
+}
+
+func TestPrepareHerdrExistingExecutableSkipsInstall(t *testing.T) {
+	runner := &fakeNativeRunner{}
+	if err := nativePreparationClient(t, runner).PrepareHerdr(context.Background(), "sprite-one"); err != nil {
+		t.Fatalf("PrepareHerdr() error = %v", err)
 	}
 	want := []nativeCommandSpec{
 		{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}},
@@ -75,7 +275,7 @@ func TestPrepareNativeExistingExecutableSkipsInstall(t *testing.T) {
 	}
 }
 
-func TestPrepareNativeMissingExecutableRunsFixedSequence(t *testing.T) {
+func TestPrepareHerdrMissingExecutableRunsFixedSequence(t *testing.T) {
 	runner := &fakeNativeRunner{run: func(_ context.Context, _ nativeCommandSpec, index int) (string, error) {
 		switch index {
 		case 0:
@@ -87,12 +287,12 @@ func TestPrepareNativeMissingExecutableRunsFixedSequence(t *testing.T) {
 		}
 	}}
 	client := nativePreparationClient(t, runner)
-	if _, err := client.PrepareNative(context.Background(), "sprite-one"); err != nil {
-		t.Fatalf("PrepareNative() error = %v", err)
+	if err := client.PrepareHerdr(context.Background(), "sprite-one"); err != nil {
+		t.Fatalf("PrepareHerdr() error = %v", err)
 	}
 	want := []nativeCommandSpec{
 		{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}},
-		{path: "/usr/bin/mktemp", captureOutput: true},
+		{path: "/usr/bin/mktemp", outputLimit: nativeOutputMax},
 		{path: "/usr/bin/curl", args: []string{"-fsSL", nativeInstallURL, "-o", "/tmp/herdr-installer"}},
 		{path: "/bin/sh", args: []string{"/tmp/herdr-installer"}, env: []string{"HOME=/home/sprite"}},
 		{path: "/bin/rm", args: []string{"-f", "/tmp/herdr-installer"}},
@@ -103,7 +303,7 @@ func TestPrepareNativeMissingExecutableRunsFixedSequence(t *testing.T) {
 	}
 }
 
-func TestPrepareNativeFailuresCleanUpAndStaySanitized(t *testing.T) {
+func TestPrepareHerdrFailuresCleanUpAndStaySanitized(t *testing.T) {
 	const token = "secret-native-token"
 	for _, failurePath := range []string{"/usr/bin/curl", "/bin/sh", nativeExecutable} {
 		failurePath := failurePath
@@ -122,9 +322,9 @@ func TestPrepareNativeFailuresCleanUpAndStaySanitized(t *testing.T) {
 			}}
 			client := nativePreparationClient(t, runner)
 			client.token = token
-			_, err := client.PrepareNative(context.Background(), "sprite-one")
+			err := client.PrepareHerdr(context.Background(), "sprite-one")
 			if err == nil {
-				t.Fatal("PrepareNative() succeeded, want failure")
+				t.Fatal("PrepareHerdr() succeeded, want failure")
 			}
 			if strings.Contains(err.Error(), token) {
 				t.Fatalf("error leaked token: %v", err)
@@ -150,7 +350,7 @@ func TestPrepareNativeFailuresCleanUpAndStaySanitized(t *testing.T) {
 	}
 }
 
-func TestPrepareNativeRejectsUnsafeTemporaryPathsWithoutUsingThem(t *testing.T) {
+func TestPrepareHerdrRejectsUnsafeTemporaryPathsWithoutUsingThem(t *testing.T) {
 	for _, path := range []string{"relative", "/tmp/a/child", "/var/tmp/file", "/tmp/../tmp/file", "/tmp"} {
 		path := path
 		t.Run(strings.ReplaceAll(path, "/", "_"), func(t *testing.T) {
@@ -160,9 +360,9 @@ func TestPrepareNativeRejectsUnsafeTemporaryPathsWithoutUsingThem(t *testing.T) 
 				}
 				return path + "\n", nil
 			}}
-			_, err := nativePreparationClient(t, runner).PrepareNative(context.Background(), "sprite-one")
+			err := nativePreparationClient(t, runner).PrepareHerdr(context.Background(), "sprite-one")
 			if err == nil {
-				t.Fatal("PrepareNative() succeeded for unsafe path")
+				t.Fatal("PrepareHerdr() succeeded for unsafe path")
 			}
 			if got := len(runner.specs()); got != 2 {
 				t.Fatalf("command count = %d, want only test and mktemp", got)
@@ -171,7 +371,7 @@ func TestPrepareNativeRejectsUnsafeTemporaryPathsWithoutUsingThem(t *testing.T) 
 	}
 }
 
-func TestPrepareNativeCleansUpAfterCancellation(t *testing.T) {
+func TestPrepareHerdrCleansUpAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runner := &fakeNativeRunner{run: func(commandCtx context.Context, spec nativeCommandSpec, index int) (string, error) {
 		switch index {
@@ -189,9 +389,9 @@ func TestPrepareNativeCleansUpAfterCancellation(t *testing.T) {
 		}
 		return "", nil
 	}}
-	_, err := nativePreparationClient(t, runner).PrepareNative(ctx, "sprite-one")
+	err := nativePreparationClient(t, runner).PrepareHerdr(ctx, "sprite-one")
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("PrepareNative() error = %v, want context.Canceled", err)
+		t.Fatalf("PrepareHerdr() error = %v, want context.Canceled", err)
 	}
 	specs := runner.specs()
 	if specs[len(specs)-1].path != "/bin/rm" {
@@ -227,8 +427,7 @@ func TestClientCloseWaitsForCanceledNativePreparationCleanup(t *testing.T) {
 	client := &Client{root: root, token: "token", nativeRunner: runner, nativeDeps: productionNativeDependencies(), closed: make(chan struct{}), bridges: make(map[*bridge]struct{})}
 	prepareDone := make(chan error, 1)
 	go func() {
-		_, err := client.PrepareNative(root, "sprite-one")
-		prepareDone <- err
+		prepareDone <- client.PrepareHerdr(root, "sprite-one")
 	}()
 	<-curlStarted
 	cancel()
@@ -250,10 +449,10 @@ func TestClientCloseWaitsForCanceledNativePreparationCleanup(t *testing.T) {
 		t.Fatal("Client.Close did not return after cleanup")
 	}
 	if err := <-prepareDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("PrepareNative() error = %v, want context.Canceled", err)
+		t.Fatalf("PrepareHerdr() error = %v, want context.Canceled", err)
 	}
-	if _, err := client.PrepareNative(context.Background(), "sprite-one"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("PrepareNative() after Close error = %v, want context.Canceled", err)
+	if err := client.PrepareHerdr(context.Background(), "sprite-one"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PrepareHerdr() after Close error = %v, want context.Canceled", err)
 	}
 }
 
@@ -399,7 +598,7 @@ func TestNativeCommandExactTransportAndBinaryIO(t *testing.T) {
 			t.Errorf("path = %q", request.URL.Path)
 		}
 		wantQuery := url.Values{
-			"cmd":   {nativeExecutable},
+			"cmd":   {nativeExecutable, "--session", "work"},
 			"path":  {nativeExecutable},
 			"tty":   {"true"},
 			"stdin": {"true"},
@@ -597,7 +796,7 @@ func TestNativeCommandSanitizesDialErrors(t *testing.T) {
 	terminal := &fakeTerminal{cols: 80, rows: 24}
 	reader := newFakeCancelReader()
 	command := &NativeCommand{
-		ctx: context.Background(), name: "sprite-one", token: token,
+		ctx: context.Background(), name: "sprite-one", session: "work", token: token,
 		deps: nativeDependencies{
 			baseURL: "wss://example.invalid", dialer: errorDialer{err: errors.New("dial " + token)}, terminal: terminal,
 			newCancelReader: func(io.Reader) (nativeCancelReader, error) { return reader, nil }, resizeSignals: &fakeSignals{},
@@ -621,7 +820,7 @@ func (d errorDialer) DialContext(context.Context, string, http.Header) (*websock
 
 func testNativeCommand(ctx context.Context, baseURL, token string, terminal *fakeTerminal, reader nativeCancelReader, signals *fakeSignals, output io.Writer) *NativeCommand {
 	return &NativeCommand{
-		ctx: ctx, name: "sprite-one", token: token,
+		ctx: ctx, name: "sprite-one", session: "work", token: token,
 		deps: nativeDependencies{
 			baseURL: baseURL, dialer: websocket.DefaultDialer, terminal: terminal,
 			newCancelReader: func(io.Reader) (nativeCancelReader, error) { return reader, nil }, resizeSignals: signals,

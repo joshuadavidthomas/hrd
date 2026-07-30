@@ -25,16 +25,18 @@ Usage:
 Run hrd from a terminal outside Herdr; nested launches are rejected.
 
 Sprite support:
-  SPRITE_TOKEN  enable Sprite inventory, creation, and attach
+  SPRITE_TOKEN  enable Sprite inventory, creation, and session management
   Native        default; Herdr and its config run inside the Sprite
-  SSH fallback  local Herdr uses SSH_AUTH_SOCK, 1Password, or hrd-managed ssh-add
+  SSH           alternate transport using SSH_AUTH_SOCK, 1Password, or ssh-add
 
 Keys:
   ↑/↓, j/k  move
-  enter     attach
+  enter     open an endpoint or attach a session
   n         create a Sprite
+  s / R     stop / restart a running Sprite session
   /         search
   r         refresh
+  esc       return to endpoints
   ?         help
   q         quit
 `

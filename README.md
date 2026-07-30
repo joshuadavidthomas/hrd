@@ -10,7 +10,7 @@ so the outer session cannot steal the inner session's keybindings.
 - Go 1.25.8 or newer
 - `herdr` in `PATH`
 - Optional Sprite support: `SPRITE_TOKEN`
-- SSH fallback only: `ssh-agent` and `ssh-add`
+- SSH transport only: `ssh-agent` and `ssh-add`
 
 ## Install
 
@@ -32,25 +32,31 @@ sends one create request and never retries it. An unknown outcome blocks another
 creation for that name until a complete inventory contains it or you reconcile
 it outside `hrd`.
 
-Selecting a Sprite opens two fixed choices:
+Selecting a Sprite wakes only that Sprite and opens its Herdr sessions. The
+opening inventory never wakes every Sprite. Session rows show Herdr's own
+running or stopped state; the endpoint row separately shows the latest Sprite
+API lifecycle observation. Idle inventory refreshes every ten seconds.
 
-- `Native Sprite terminal` is the default. It runs
-  `/home/sprite/.local/bin/herdr` inside the Sprite with the Sprites terminal
-  API and sets `/bin/bash` as the shell for new panes. Herdr and its config live
-  in the Sprite; no SSH key or service is needed.
-- `SSH thin client` keeps local Herdr and local integrations in use. It remains
-  available as the transport for sandbox providers without a native exec PTY.
-
-For native attachment, `hrd` checks the fixed Herdr path. When Herdr is absent,
-it downloads <https://herdr.dev/install.sh> to a validated temporary path, runs
-that file with `/bin/sh`, removes it, and checks that `herdr --version` runs.
+When Herdr is absent, `hrd` asks before it downloads
+<https://herdr.dev/install.sh> to a validated temporary path, runs that file
+with `/bin/sh`, removes it, and checks that `herdr --version` runs. Opening a
+Sprite never runs the installer without that confirmation.
 Herdr publishes no checksum or signature manifest for this installer. HTTPS,
 its redirects, the downloaded script, and the asset URLs chosen by that script
 form the trust boundary. The installer is the launcher's sole shell use; no user
 text enters its command or arguments.
 
-The SSH fallback checks `SSH_AUTH_SOCK`, then 1Password's standard agent socket.
-It uses a sole key automatically; when an agent exposes several, the picker asks
+After selecting a session, choose one of two transports:
+
+- `Native Sprite terminal` is the default. It runs
+  `/home/sprite/.local/bin/herdr --session NAME` inside the Sprite with the
+  Sprites terminal API and sets `/bin/bash` as the shell for new panes. Herdr
+  and its config live in the Sprite; no SSH key or service is needed.
+- `SSH` keeps local Herdr and local integrations in use. It remains available
+  for sandbox providers without a native exec PTY.
+
+The SSH transport checks `SSH_AUTH_SOCK`, then 1Password's standard agent
+socket. It uses a sole key automatically; when an agent exposes several, the picker asks
 which one to use and remembers that choice for the current run. Only the
 selected public key is installed in the Sprite.
 
@@ -59,13 +65,13 @@ terminal to plain `ssh-add`. With no arguments, `ssh-add` loads OpenSSH's defaul
 identities and owns any passphrase prompt. `hrd` never parses private-key bytes
 or puts a key path in argv.
 
-The fallback installs OpenSSH when needed, writes the selected public key to
-`/home/sprite/.ssh/hrd_authorized_keys`, and creates or updates the fixed
+The SSH transport installs OpenSSH when needed, writes the selected public key
+to `/home/sprite/.ssh/hrd_authorized_keys`, and creates or updates the fixed
 `hrd-sshd` service. It opens an ephemeral loopback-only SSH bridge. Tokens stay
 in process memory. The private agent and its socket are removed when `hrd`
 exits.
 
-The picker shows the authenticated SSH host-key fingerprint before fallback
+The picker shows the authenticated SSH host-key fingerprint before SSH
 handoff. Compare it with OpenSSH's prompt. Herdr may ask to accept the host key,
 install its matching remote binary, or restart a mismatched server. If a reused
 loopback port has an old host key, remove only the exact entry OpenSSH names:
@@ -78,10 +84,13 @@ ssh-keygen -R '[127.0.0.1]:PORT'
 resource; clean up disposable Sprites outside `hrd`.
 
 ```text
-enter   attach
-n       create Sprite when enabled
-r       refresh
+enter   open an endpoint or attach a session
+n       create Sprite from the endpoint screen
+s       stop a running Sprite session
+R       restart a running Sprite session
+r       refresh the current screen
 /       filter
+esc     return to endpoints
 ?       help
 q       quit when the filter is not editing
 ctrl+c  quit

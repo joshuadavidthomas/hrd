@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"reflect"
@@ -21,52 +22,47 @@ import (
 )
 
 type fakeOperations struct {
-	listCalls    atomic.Int32
-	prepareCalls atomic.Int32
-	listFn       func(context.Context, int) ([]catalog.Destination, error)
-	prepareFn    func(context.Context, catalog.Destination, int) (catalog.PreparedAttach, error)
+	inventoryCalls atomic.Int32
+	prepareCalls   atomic.Int32
+	inventoryFn    func(context.Context, int) catalog.Inventory
+	prepareFn      func(context.Context, catalog.Destination, int) (catalog.PreparedAttach, error)
 }
 
-func (f *fakeOperations) List(ctx context.Context) ([]catalog.Destination, error) {
-	call := int(f.listCalls.Add(1))
-	if f.listFn == nil {
-		return testDestinations(), nil
+func (f *fakeOperations) Inventory(ctx context.Context) catalog.Inventory {
+	call := int(f.inventoryCalls.Add(1))
+	if f.inventoryFn != nil {
+		return f.inventoryFn(ctx, call)
 	}
-	return f.listFn(ctx, call)
+	return catalog.Inventory{
+		Local:   catalog.SourceResult{Rows: localRows()},
+		Sprites: catalog.SourceResult{Skipped: true},
+	}
 }
 
 func (f *fakeOperations) Prepare(ctx context.Context, destination catalog.Destination) (catalog.PreparedAttach, error) {
 	call := int(f.prepareCalls.Add(1))
-	if f.prepareFn == nil {
-		return catalog.Prepare(destination)
+	if f.prepareFn != nil {
+		return f.prepareFn(ctx, destination, call)
 	}
-	return f.prepareFn(ctx, destination, call)
+	return catalog.Prepare(destination)
 }
 
 type fakeSpriteOperations struct {
 	*fakeOperations
 	inventoryCalls     atomic.Int32
 	createCalls        atomic.Int32
-	spritePrepareCalls atomic.Int32
+	listSpriteCalls    atomic.Int32
+	installCalls       atomic.Int32
+	stopCalls          atomic.Int32
+	prepareSpriteCalls atomic.Int32
 	inventoryFn        func(context.Context, int) catalog.Inventory
 	createFn           func(context.Context, string, int) sprites.CreateResult
-	spritePrepareFn    func(context.Context, string, catalog.SpriteTransport, int) (catalog.PreparedAttach, error)
-}
-
-func (f *fakeSpriteOperations) Create(ctx context.Context, name string) sprites.CreateResult {
-	call := int(f.createCalls.Add(1))
-	if f.createFn == nil {
-		return sprites.CreateResult{Name: name, Confirmed: true}
-	}
-	return f.createFn(ctx, name, call)
-}
-
-func (f *fakeSpriteOperations) PrepareSprite(ctx context.Context, name string, transport catalog.SpriteTransport) (catalog.PreparedAttach, error) {
-	call := int(f.spritePrepareCalls.Add(1))
-	if f.spritePrepareFn == nil {
-		return nil, errors.New("unexpected Sprite preparation")
-	}
-	return f.spritePrepareFn(ctx, name, transport, call)
+	listSpriteFn       func(context.Context, catalog.SpriteEndpointSelection, int) ([]catalog.Destination, error)
+	installFn          func(context.Context, catalog.SpriteEndpointSelection, int) error
+	stopFn             func(context.Context, catalog.SpriteSessionSelection, int) error
+	prepareSpriteFn    func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error)
+	preparedSelection  catalog.SpriteSessionSelection
+	preparedTransport  catalog.SpriteTransport
 }
 
 func (f *fakeSpriteOperations) Inventory(ctx context.Context) catalog.Inventory {
@@ -74,24 +70,68 @@ func (f *fakeSpriteOperations) Inventory(ctx context.Context) catalog.Inventory 
 	if f.inventoryFn != nil {
 		return f.inventoryFn(ctx, call)
 	}
-	rows, err := f.List(ctx)
-	var inventory catalog.Inventory
-	if err != nil {
-		inventory.Local.Err = err
-		return inventory
-	}
-	for _, row := range rows {
-		switch row.Endpoint.(type) {
-		case catalog.LocalEndpoint:
-			inventory.Local.Rows = append(inventory.Local.Rows, row)
-		case catalog.SpriteEndpoint:
-			inventory.Sprites.Rows = append(inventory.Sprites.Rows, row)
-		}
-	}
-	return inventory
+	return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Running)}}
 }
 
-// fakeTerminalCommand has the exact provider-command shape consumed by tea.Exec.
+func (f *fakeSpriteOperations) Create(ctx context.Context, name string) sprites.CreateResult {
+	call := int(f.createCalls.Add(1))
+	if f.createFn != nil {
+		return f.createFn(ctx, name, call)
+	}
+	return sprites.CreateResult{Name: name, Confirmed: true}
+}
+
+func (f *fakeSpriteOperations) ListSpriteSessions(ctx context.Context, endpoint catalog.SpriteEndpointSelection) ([]catalog.Destination, error) {
+	call := int(f.listSpriteCalls.Add(1))
+	if f.listSpriteFn != nil {
+		return f.listSpriteFn(ctx, endpoint, call)
+	}
+	return spriteSessionRows("devbox", sprites.Running), nil
+}
+
+func (f *fakeSpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint catalog.SpriteEndpointSelection) error {
+	call := int(f.installCalls.Add(1))
+	if f.installFn != nil {
+		return f.installFn(ctx, endpoint, call)
+	}
+	return nil
+}
+
+func (f *fakeSpriteOperations) StopSpriteSession(ctx context.Context, selection catalog.SpriteSessionSelection) error {
+	call := int(f.stopCalls.Add(1))
+	if f.stopFn != nil {
+		return f.stopFn(ctx, selection, call)
+	}
+	return nil
+}
+
+func (f *fakeSpriteOperations) PrepareSprite(ctx context.Context, selection catalog.SpriteSessionSelection, transport catalog.SpriteTransport) (catalog.PreparedAttach, error) {
+	call := int(f.prepareSpriteCalls.Add(1))
+	f.preparedSelection, f.preparedTransport = selection, transport
+	if f.prepareSpriteFn != nil {
+		return f.prepareSpriteFn(ctx, selection, transport, call)
+	}
+	return nil, errors.New("unexpected Sprite preparation")
+}
+
+type fakeSSHOperations struct {
+	*fakeSpriteOperations
+	addCalls   atomic.Int32
+	addCommand *exec.Cmd
+	addErr     error
+	selected   string
+	selectErr  error
+}
+
+func (f *fakeSSHOperations) SSHAddCommand(context.Context) (*exec.Cmd, error) {
+	f.addCalls.Add(1)
+	return f.addCommand, f.addErr
+}
+func (f *fakeSSHOperations) SelectSSHKey(fingerprint string) error {
+	f.selected = fingerprint
+	return f.selectErr
+}
+
 type fakeTerminalCommand struct{}
 
 func (*fakeTerminalCommand) Run() error          { return nil }
@@ -99,1328 +139,890 @@ func (*fakeTerminalCommand) SetStdin(io.Reader)  {}
 func (*fakeTerminalCommand) SetStdout(io.Writer) {}
 func (*fakeTerminalCommand) SetStderr(io.Writer) {}
 
-type fakeSSHKeyOperations struct {
-	*fakeSpriteOperations
-	addCalls atomic.Int32
-	command  *exec.Cmd
-	err      error
-	selected string
-}
-
-func (f *fakeSSHKeyOperations) SSHAddCommand(context.Context) (*exec.Cmd, error) {
-	f.addCalls.Add(1)
-	return f.command, f.err
-}
-
-func (f *fakeSSHKeyOperations) SelectSSHKey(fingerprint string) error {
-	f.selected = fingerprint
-	return nil
-}
-
-func TestInitialLoadProducesReadySelectableRows(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeOperations{}
-	model := New(context.Background(), operations)
-	if model.phase != phaseLoading || model.operationID != 1 {
-		t.Fatalf("new phase/id = (%v, %d), want (loading, 1)", model.phase, model.operationID)
+func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
+	ops := &fakeOperations{}
+	model := New(context.Background(), ops)
+	if model.phase != phaseLoading || model.operationID != 1 || len(model.browser.Items()) != 0 {
+		t.Fatalf("new model phase/id/items = %v/%d/%d", model.phase, model.operationID, len(model.browser.Items()))
 	}
-	if content := model.View().Content; !strings.Contains(content, "Loading destinations") {
+	if content := model.View().Content; !strings.Contains(content, "Loading local sessions") {
 		t.Fatalf("loading view = %q", content)
 	}
+	model, cmd := update(t, model, run(t, model.initialCmd))
+	if cmd != nil || model.phase != phaseReady || len(model.browser.Items()) != 2 || ops.inventoryCalls.Load() != 1 {
+		t.Fatalf("loaded phase/items/calls/cmd = %v/%d/%d/%v", model.phase, len(model.browser.Items()), ops.inventoryCalls.Load(), cmd)
+	}
+	view := model.View()
+	for _, want := range []string{"default", "Local", "running", "alpha", "stopped", "enter", "refresh"} {
+		if !strings.Contains(view.Content, want) {
+			t.Errorf("ready view lacks %q: %q", want, view.Content)
+		}
+	}
+	if !view.AltScreen || view.WindowTitle == "" {
+		t.Fatalf("view flags = alt %v title %q", view.AltScreen, view.WindowTitle)
+	}
+}
 
-	model, cmd := runUpdate(t, model, runCmd(t, model.Init()))
-	if cmd != nil {
-		t.Fatal("initial completion returned an unexpected command")
+func TestPartialSourceFailureRetainsStaleRowsAndDisablesTheirActions(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		result := catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}}
+		if call == 1 {
+			result.Sprites.Rows = spriteEndpointRows("devbox", sprites.Warm)
+		} else {
+			result.Sprites.Err = errors.New("provider unavailable")
+		}
+		return result
 	}
-	if model.phase != phaseReady || !model.attachEnabled {
-		t.Fatalf("loaded phase/enabled = (%v, %v), want ready/true", model.phase, model.attachEnabled)
+	model := ready(t, ops)
+	model.browser.Select(2)
+	model.selectedID = selected(t, model).ID
+	model, refresh := update(t, model, press("r"))
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.phase != phaseReady || !model.localSnapshot.current || model.spriteSnapshot.current {
+		t.Fatalf("snapshot current flags = local %v Sprite %v", model.localSnapshot.current, model.spriteSnapshot.current)
 	}
-	if operations.listCalls.Load() != 1 {
-		t.Fatalf("list calls = %d, want 1", operations.listCalls.Load())
+	if selected(t, model).Label != "devbox" {
+		t.Fatalf("selection was not retained: %q", selected(t, model).Label)
 	}
 	content := model.View().Content
-	for _, want := range []string{"Local", "default", "running", "alpha", "stopped", "attach", "refresh", "search", "help"} {
+	for _, want := range []string{"devbox", "stale", "provider unavailable", "checked"} {
 		if !strings.Contains(content, want) {
-			t.Errorf("ready view %q does not contain %q", content, want)
+			t.Errorf("stale view lacks %q: %q", want, content)
 		}
+	}
+	unchanged, cmd := update(t, model, press("enter"))
+	if cmd != nil || unchanged.screen != screenEndpoints || ops.listSpriteCalls.Load() != 0 {
+		t.Fatal("stale Sprite endpoint started a state-sensitive effect")
 	}
 }
 
-func TestReadyViewGroupsLocalAndSpriteDestinations(t *testing.T) {
-	t.Parallel()
-	model := readyModel(t, &fakeOperations{})
-	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	model.destinations = append(model.destinations, spriteRows...)
-	content := model.View().Content
-	for _, want := range []string{"2 local", "1 Sprite", "Local", "Sprites", "devbox", "cold"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("view %q does not contain %q", content, want)
+func TestLocalSourceFailureRetainsSpritesAndRecovers(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		result := catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Running)}}
+		if call == 2 {
+			result.Local.Rows = nil
+			result.Local.Err = errors.New("local unavailable")
 		}
+		return result
+	}
+	model := ready(t, ops)
+	model, refresh := update(t, model, press("r"))
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.localSnapshot.current || !model.spriteSnapshot.current || len(model.browser.Items()) != 3 {
+		t.Fatalf("partial local failure = local %v Sprite %v items %d", model.localSnapshot.current, model.spriteSnapshot.current, len(model.browser.Items()))
+	}
+	model, refresh = update(t, model, press("r"))
+	model, _ = update(t, model, runFirst(t, refresh))
+	if !model.localSnapshot.current || !model.spriteSnapshot.current || model.refreshNotice != "" {
+		t.Fatalf("source recovery = local %v Sprite %v warning %q", model.localSnapshot.current, model.spriteSnapshot.current, model.refreshNotice)
 	}
 }
 
-func TestExistingSpriteOpensNativeDefaultTransportChooser(t *testing.T) {
-	t.Parallel()
-
-	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Running}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return rows, nil }}
-	operations := &fakeSpriteOperations{fakeOperations: base}
-	model := readySpriteModel(t, operations)
-
-	model, cmd := runUpdate(t, model, press("enter"))
-	if cmd != nil || model.phase != phaseChoosingSpriteTransport {
-		t.Fatalf("selection phase/cmd = (%v, %v), want choosing transport/nil", model.phase, cmd)
-	}
-	if model.transportTarget.origin != spriteOriginExisting || model.transportTarget.name != "devbox" || model.transportTarget.transport != catalog.NativePreview {
-		t.Fatalf("default chooser target = %#v", model.transportTarget)
-	}
-	for _, want := range []string{
-		"Native Sprite terminal", "preview", "recommended", "Herdr and its config live in the Sprite",
-		"SSH thin client", "fallback", "Local Herdr and your SSH agent are used", "enter", "esc",
-	} {
-		if content := model.View().Content; !strings.Contains(content, want) {
-			t.Errorf("transport chooser %q does not contain %q", content, want)
+func TestTotalInitialFailureRetriesToReady(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		if call == 1 {
+			return catalog.Inventory{Local: catalog.SourceResult{Err: errors.New("local down")}, Sprites: catalog.SourceResult{Err: errors.New("Sprites down")}}
 		}
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Running)}}
 	}
-	model, _ = runUpdate(t, model, press("j"))
-	if model.transportTarget.transport != catalog.SSHFallback {
-		t.Fatalf("j selection = %v, want SSH fallback", model.transportTarget.transport)
+	model := New(context.Background(), ops)
+	model, _ = update(t, model, run(t, model.initialCmd))
+	if model.phase != phaseInitialLoadFailed || !strings.Contains(model.View().Content, "local down") || !strings.Contains(model.View().Content, "Sprites down") {
+		t.Fatalf("initial failure = phase %v view %q", model.phase, model.View().Content)
 	}
-	model, _ = runUpdate(t, model, press("k"))
-	if model.transportTarget.transport != catalog.NativePreview {
-		t.Fatalf("k selection = %v, want native", model.transportTarget.transport)
-	}
-	model, _ = runUpdate(t, model, tea.WindowSizeMsg{Width: 30, Height: 20})
-	assertViewFits(t, model.View(), 30, 20)
-	for _, want := range []string{"Native Sprite terminal", "SSH thin client"} {
-		if !strings.Contains(model.View().Content, want) {
-			t.Errorf("narrow chooser lost %q: %q", want, model.View().Content)
-		}
+	model, retry := update(t, model, press("r"))
+	model, _ = update(t, model, runFirst(t, retry))
+	if model.phase != phaseReady || len(model.browser.Items()) != 3 {
+		t.Fatalf("initial retry = phase %v items %d", model.phase, len(model.browser.Items()))
 	}
 }
 
-func TestTransportChooserCancelUsesOriginPolicy(t *testing.T) {
-	t.Parallel()
-
-	t.Run("existing Sprite returns to snapshot without effects", func(t *testing.T) {
-		t.Parallel()
-		rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return rows, nil }}
-		operations := &fakeSpriteOperations{fakeOperations: base}
-		model := readySpriteModel(t, operations)
-		model, _ = runUpdate(t, model, press("enter"))
-		model, cmd := runUpdate(t, model, press("esc"))
-		if cmd != nil || model.phase != phaseReady {
-			t.Fatalf("cancel phase/cmd = (%v, %v), want ready/nil", model.phase, cmd)
-		}
-		if base.listCalls.Load() != 1 || operations.spritePrepareCalls.Load() != 0 || operations.createCalls.Load() != 0 {
-			t.Fatalf("cancel effects list/prepare/create = (%d, %d, %d)", base.listCalls.Load(), operations.spritePrepareCalls.Load(), operations.createCalls.Load())
-		}
-	})
-
-	t.Run("confirmed creation starts one refresh", func(t *testing.T) {
-		t.Parallel()
-		base := &fakeOperations{}
-		operations := &fakeSpriteOperations{fakeOperations: base}
-		model := readySpriteModel(t, operations)
-		model, _ = runUpdate(t, model, press("n"))
-		for _, letter := range []string{"n", "e", "w", "b", "o", "x"} {
-			model, _ = runUpdate(t, model, press(letter))
-		}
-		model, createCmd := runUpdate(t, model, press("enter"))
-		model, _ = runUpdate(t, model, runCmd(t, createCmd))
-		if model.phase != phaseChoosingSpriteTransport || model.transportTarget.origin != spriteOriginConfirmedCreate || model.transportTarget.transport != catalog.NativePreview {
-			t.Fatalf("confirmed create chooser = phase %v, target %#v", model.phase, model.transportTarget)
-		}
-		if len(model.destinations) != len(testDestinations()) {
-			t.Fatal("confirmed creation fabricated a destination row")
-		}
-		model, refreshCmd := runUpdate(t, model, press("esc"))
-		if refreshCmd == nil || model.phase != phaseRefreshing || base.listCalls.Load() != 1 {
-			t.Fatalf("created cancel phase/list/cmd = (%v, %d, %v)", model.phase, base.listCalls.Load(), refreshCmd)
-		}
-		model, duplicate := runUpdate(t, model, press("esc"))
-		if duplicate != nil {
-			t.Fatal("created cancel started a second refresh")
-		}
-		model, _ = runUpdate(t, model, runCmd(t, refreshCmd))
-		if base.listCalls.Load() != 2 || model.phase != phaseReady {
-			t.Fatalf("refresh calls/phase = (%d, %v), want 2/ready", base.listCalls.Load(), model.phase)
-		}
-	})
-}
-
-func TestConfirmedCreateCallsProviderOnceWithoutSSHRepair(t *testing.T) {
-	t.Parallel()
-
-	base := &fakeOperations{}
-	spriteOps := &fakeSpriteOperations{fakeOperations: base}
-	operations := &fakeSSHKeyOperations{fakeSpriteOperations: spriteOps, command: exec.Command("ssh-add")}
-	model := readySpriteModel(t, operations)
-	model, _ = runUpdate(t, model, press("n"))
-	model.spriteName = "newbox"
-	model, createCmd := runUpdate(t, model, press("enter"))
-	model, followup := runUpdate(t, model, runCmd(t, createCmd))
-	if followup != nil || model.phase != phaseChoosingSpriteTransport {
-		t.Fatalf("create completion phase/cmd = (%v, %v), want chooser/nil", model.phase, followup)
-	}
-	if spriteOps.createCalls.Load() != 1 || operations.addCalls.Load() != 0 || spriteOps.spritePrepareCalls.Load() != 0 || operations.selected != "" {
-		t.Fatalf("create/ssh-add/prepare/selected = (%d, %d, %d, %q)", spriteOps.createCalls.Load(), operations.addCalls.Load(), spriteOps.spritePrepareCalls.Load(), operations.selected)
-	}
-}
-
-func TestNativeSpriteAttachUsesOnlyProviderCommandAndRefreshesOnce(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		name      string
-		attachErr error
-	}{
-		{name: "success"},
-		{name: "failure", attachErr: errors.New("native terminal failed")},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Running}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			command := &fakeTerminalCommand{}
-			base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return rows, nil }}
-			operations := &fakeSpriteOperations{
-				fakeOperations: base,
-				spritePrepareFn: func(_ context.Context, name string, transport catalog.SpriteTransport, _ int) (catalog.PreparedAttach, error) {
-					if name != "devbox" || transport != catalog.NativePreview {
-						t.Fatalf("native preparation = (%q, %v)", name, transport)
-					}
-					return catalog.PreparedNativeAttach{Command: command}, nil
-				},
-			}
-			model := readySpriteModel(t, operations)
-			processCalls := 0
-			model.execProcess = func(*exec.Cmd, tea.ExecCallback) tea.Cmd { processCalls++; return nil }
-			var executed tea.ExecCommand
-			model.execCommand = func(got tea.ExecCommand, callback tea.ExecCallback) tea.Cmd {
-				executed = got
-				return func() tea.Msg { return callback(test.attachErr) }
-			}
-			model, _ = runUpdate(t, model, press("enter"))
-			model, prepareCmd := runUpdate(t, model, press("enter"))
-			prepareID := model.operationID
-			model, stale := runUpdate(t, model, prepareDone{opID: prepareID - 1})
-			if stale != nil || model.phase != phasePreparing || executed != nil {
-				t.Fatal("stale native completion changed preparation")
-			}
-			model, execCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-			if execCmd == nil || model.phase != phaseAttaching || executed != command || processCalls != 0 || base.prepareCalls.Load() != 0 {
-				t.Fatalf("native handoff cmd/phase/identity/process/local = (%v, %v, %v, %d, %d)", execCmd, model.phase, executed == command, processCalls, base.prepareCalls.Load())
-			}
-			model, refreshCmd := runUpdate(t, model, runCmd(t, execCmd))
-			if refreshCmd == nil || model.phase != phaseRefreshing || base.listCalls.Load() != 1 {
-				t.Fatalf("attach completion phase/list/cmd = (%v, %d, %v)", model.phase, base.listCalls.Load(), refreshCmd)
-			}
-			model, duplicate := runUpdate(t, model, attachDone{opID: prepareID, err: test.attachErr})
-			if duplicate != nil {
-				t.Fatal("duplicate native completion started another refresh")
-			}
-			_ = runCmd(t, refreshCmd)
-			if base.listCalls.Load() != 2 {
-				t.Fatalf("list calls = %d, want 2", base.listCalls.Load())
-			}
-		})
-	}
-}
-
-func TestNativePreparationFailureNeverStartsSSHRecovery(t *testing.T) {
-	t.Parallel()
-
-	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return rows, nil }}
-	spriteOps := &fakeSpriteOperations{
-		fakeOperations: base,
-		spritePrepareFn: func(context.Context, string, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
-			return nil, sshagent.ErrNoKeys
-		},
-	}
-	operations := &fakeSSHKeyOperations{fakeSpriteOperations: spriteOps, command: exec.Command("ssh-add")}
-	model := readySpriteModel(t, operations)
-	model, _ = runUpdate(t, model, press("enter"))
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, refreshCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	if refreshCmd == nil || model.phase != phaseRefreshing || operations.addCalls.Load() != 0 || !strings.Contains(model.attachNotice, "Couldn’t prepare") {
-		t.Fatalf("native failure phase/cmd/add/notice = (%v, %v, %d, %q)", model.phase, refreshCmd, operations.addCalls.Load(), model.attachNotice)
-	}
-}
-
-func TestMissingAgentNoticeGivesNextAction(t *testing.T) {
-	t.Parallel()
-	notice := prepareFailureNotice(errors.New("ssh-agent is not available: SSH_AUTH_SOCK is unset"))
-	for _, want := range []string{"SSH key required", "ssh-agent", "ssh-add", "try again"} {
-		if !strings.Contains(notice, want) {
-			t.Errorf("notice %q does not contain %q", notice, want)
-		}
-	}
-}
-
-func TestLoadingIgnoresActionKeysWithoutStartingAnotherOperation(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeOperations{}
-	model := New(context.Background(), operations)
-	initialID := model.operationID
-	for _, action := range []tea.Msg{press("r"), press("enter"), press("?"), press("/")} {
-		var cmd tea.Cmd
-		model, cmd = runUpdate(t, model, action)
-		if cmd != nil {
-			t.Fatalf("loading action %v returned a command", action)
-		}
-		if model.operationID != initialID {
-			t.Fatalf("loading action changed ID to %d, want %d", model.operationID, initialID)
-		}
-	}
-	if operations.listCalls.Load() != 0 {
-		t.Fatalf("loading actions ran list: calls = %d", operations.listCalls.Load())
-	}
-}
-
-func TestRefreshUsesIncreasingIDAndIgnoresDuplicateActionKeys(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeOperations{}
-	model := readyModel(t, operations)
-	initialID := model.operationID
-
-	model, refreshCmd := runUpdate(t, model, press("r"))
-	if refreshCmd == nil || model.phase != phaseRefreshing || model.operationID <= initialID {
-		t.Fatalf("refresh phase/id/cmd = (%v, %d, %v), want refreshing, increasing, non-nil", model.phase, model.operationID, refreshCmd)
+func TestIdleRefreshHasGenerationGuardAndPreservesSelection(t *testing.T) {
+	ops := &fakeOperations{}
+	model := ready(t, ops)
+	model, _ = update(t, model, press("down"))
+	oldID := model.operationID
+	model, batch := update(t, model, refreshTick(time.Now()))
+	if model.phase != phaseReady || !model.inventoryRefreshing || model.operationID <= oldID || batch == nil {
+		t.Fatalf("idle refresh phase/refreshing/id/cmd = %v/%v/%d/%v", model.phase, model.inventoryRefreshing, model.operationID, batch)
 	}
 	refreshID := model.operationID
-	for _, action := range []tea.Msg{press("r"), press("enter"), press("?"), press("/")} {
-		var duplicate tea.Cmd
-		model, duplicate = runUpdate(t, model, action)
-		if duplicate != nil {
-			t.Fatalf("duplicate action %v returned a command", action)
-		}
-		if model.operationID != refreshID {
-			t.Fatalf("duplicate action changed ID to %d, want %d", model.operationID, refreshID)
-		}
+	model, staleCmd := update(t, model, inventoryDone{opID: oldID, inventory: catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()[:1]}, Sprites: catalog.SourceResult{Skipped: true}}})
+	if staleCmd != nil || model.operationID != refreshID || model.phase != phaseReady || !model.inventoryRefreshing {
+		t.Fatal("stale inventory completion replaced the active generation")
 	}
-	if operations.listCalls.Load() != 1 {
-		t.Fatalf("duplicate keys ran list before refresh command: calls = %d", operations.listCalls.Load())
-	}
-
-	model, _ = runUpdate(t, model, runCmd(t, refreshCmd))
-	if model.phase != phaseReady || operations.listCalls.Load() != 2 {
-		t.Fatalf("refresh completion phase/calls = (%v, %d), want ready/2", model.phase, operations.listCalls.Load())
+	model, _ = update(t, model, runFirst(t, batch))
+	if selected(t, model).Label != "alpha" || ops.inventoryCalls.Load() != 2 {
+		t.Fatalf("selection/calls after idle refresh = %q/%d", selected(t, model).Label, ops.inventoryCalls.Load())
 	}
 }
 
-func TestPrepareExecutesExactHerdrArgsThenRefreshes(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		move      tea.Msg
-		wantArgs  []string
-		wantLabel string
-	}{
-		{name: "default", wantArgs: []string{"herdr"}, wantLabel: "default"},
-		{name: "named", move: press("down"), wantArgs: []string{"herdr", "--session", "alpha"}, wantLabel: "alpha"},
+func TestFilterStartedDuringEndpointRefreshSurvivesCompletion(t *testing.T) {
+	ops := &fakeOperations{}
+	model := ready(t, ops)
+	model, refresh := update(t, model, refreshTick(time.Now()))
+	if !model.inventoryRefreshing || refresh == nil {
+		t.Fatalf("background refresh = refreshing %v cmd %v", model.inventoryRefreshing, refresh)
 	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
 
-			operations := &fakeOperations{}
-			model := readyModel(t, operations)
-			if test.move != nil {
-				model, _ = runUpdate(t, model, test.move)
-			}
+	model, _ = update(t, model, press("/"))
+	for _, letter := range "alp" {
+		model, _ = update(t, model, press(string(letter)))
+	}
+	if !model.browser.SettingFilter() || model.browser.FilterValue() != "alp" {
+		t.Fatalf("active filter = setting %v query %q", model.browser.SettingFilter(), model.browser.FilterValue())
+	}
 
-			var gotArgs []string
-			var callback tea.ExecCallback
-			var execCalls int
-			model.execProcess = func(command *exec.Cmd, cb tea.ExecCallback) tea.Cmd {
-				execCalls++
-				gotArgs = append([]string(nil), command.Args...)
-				callback = cb
-				return func() tea.Msg { return cb(nil) }
-			}
-
-			readyID := model.operationID
-			model, prepareCmd := runUpdate(t, model, press("enter"))
-			if model.phase != phasePreparing || prepareCmd == nil || model.operationID <= readyID {
-				t.Fatalf("enter phase/id/cmd = (%v, %d, %v), want preparing/increasing/non-nil", model.phase, model.operationID, prepareCmd)
-			}
-			prepareID := model.operationID
-			if content := model.View().Content; !strings.Contains(content, "Preparing "+test.wantLabel) {
-				t.Fatalf("preparing view = %q", content)
-			}
-
-			for _, duplicateKey := range []string{"enter", "r"} {
-				var duplicate tea.Cmd
-				model, duplicate = runUpdate(t, model, press(duplicateKey))
-				if duplicate != nil || model.operationID != prepareID {
-					t.Fatalf("duplicate %q returned command or changed ID", duplicateKey)
-				}
-			}
-
-			model, execCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-			if model.phase != phaseAttaching || execCmd == nil {
-				t.Fatalf("prepare completion phase/cmd = (%v, %v), want attaching/non-nil", model.phase, execCmd)
-			}
-			if execCalls != 1 || callback == nil {
-				t.Fatalf("exec adapter calls/callback = (%d, %v), want 1/non-nil", execCalls, callback)
-			}
-			if !reflect.DeepEqual(gotArgs, test.wantArgs) {
-				t.Fatalf("exec Cmd.Args = %#v, want %#v", gotArgs, test.wantArgs)
-			}
-
-			model, refreshCmd := runUpdate(t, model, runCmd(t, execCmd))
-			if model.phase != phaseRefreshing || refreshCmd == nil {
-				t.Fatalf("attach completion phase/cmd = (%v, %v), want refreshing/non-nil", model.phase, refreshCmd)
-			}
-			if model.operationID <= prepareID {
-				t.Fatalf("post-attach refresh ID = %d, want > %d", model.operationID, prepareID)
-			}
-			model, _ = runUpdate(t, model, runCmd(t, refreshCmd))
-			if model.phase != phaseReady || operations.listCalls.Load() != 2 {
-				t.Fatalf("post-attach phase/list calls = (%v, %d), want ready/2", model.phase, operations.listCalls.Load())
-			}
-		})
+	model, _ = update(t, model, runFirst(t, refresh))
+	if !model.browser.SettingFilter() || model.browser.FilterValue() != "alp" {
+		t.Fatalf("filter after refresh = setting %v query %q", model.browser.SettingFilter(), model.browser.FilterValue())
+	}
+	if got := model.browser.VisibleItems(); len(got) != 1 || selected(t, model).Label != "alpha" {
+		t.Fatalf("filtered items/selection = %d/%q", len(got), selected(t, model).Label)
 	}
 }
 
-func TestSpriteSSHFallbackUsesExactProcessAndIsolatedAgentEnvironment(t *testing.T) {
-	t.Setenv("SPRITE_TOKEN", "must-not-reach-herdr")
-	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return spriteRows, nil }}
-	operations := &fakeSpriteOperations{
-		fakeOperations: base,
-		spritePrepareFn: func(_ context.Context, name string, transport catalog.SpriteTransport, _ int) (catalog.PreparedAttach, error) {
-			if name != "devbox" || transport != catalog.SSHFallback {
-				t.Fatalf("PrepareSprite() = (%q, %v), want devbox/SSHFallback", name, transport)
-			}
-			return catalog.PrepareSpriteSSH(name, sprites.Prepared{Port: 41234, SSHAuthSocket: "/tmp/hrd-agent.sock"})
-		},
-	}
-	model := readySpriteModel(t, operations)
-	var childEnvironment, childArgs []string
-	model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
-		childArgs = append([]string(nil), command.Args...)
-		childEnvironment = append([]string(nil), command.Env...)
-		return func() tea.Msg { return callback(nil) }
-	}
-	model, chooserCmd := runUpdate(t, model, press("enter"))
-	if chooserCmd != nil || model.phase != phaseChoosingSpriteTransport {
-		t.Fatalf("Sprite selection phase/cmd = (%v, %v), want chooser/nil", model.phase, chooserCmd)
-	}
-	model, _ = runUpdate(t, model, press("down"))
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, execCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	if execCmd == nil {
-		t.Fatal("SSH fallback preparation did not hand off to local Herdr")
-	}
-	if want := []string{"herdr", "--remote", "ssh://sprite@127.0.0.1:41234"}; !reflect.DeepEqual(childArgs, want) {
-		t.Fatalf("Herdr args = %#v, want %#v", childArgs, want)
-	}
-	found := false
-	for _, entry := range childEnvironment {
-		if entry == "SSH_AUTH_SOCK=/tmp/hrd-agent.sock" {
-			found = true
-		}
-		if strings.HasPrefix(entry, "SPRITE_TOKEN=") {
-			t.Fatalf("Herdr environment contains SPRITE_TOKEN: %#v", childEnvironment)
-		}
-	}
-	if !found {
-		t.Fatalf("Herdr environment lacks managed socket: %#v", childEnvironment)
-	}
-	if base.prepareCalls.Load() != 0 {
-		t.Fatalf("Operations.Prepare calls = %d, want 0 for Sprite", base.prepareCalls.Load())
-	}
-}
-
-func TestSSHFallbackRequiresHostKeyConfirmationBeforeLocalProcess(t *testing.T) {
-	t.Parallel()
-
-	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return rows, nil }}
-	operations := &fakeSpriteOperations{
-		fakeOperations: base,
-		spritePrepareFn: func(_ context.Context, name string, transport catalog.SpriteTransport, _ int) (catalog.PreparedAttach, error) {
-			if transport != catalog.SSHFallback {
-				t.Fatalf("transport = %v, want SSHFallback", transport)
-			}
-			return catalog.PrepareSpriteSSH(name, sprites.Prepared{Port: 41234, Fingerprint: "SHA256:verified"})
-		},
-	}
-	model := readySpriteModel(t, operations)
-	execCalls := 0
-	model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
-		execCalls++
-		return func() tea.Msg { return callback(nil) }
-	}
-	model, _ = runUpdate(t, model, press("enter"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, cmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	if cmd != nil || model.phase != phaseConfirmingHostKey || execCalls != 0 {
-		t.Fatalf("host confirmation phase/cmd/exec = (%v, %v, %d)", model.phase, cmd, execCalls)
-	}
-	for _, want := range []string{"Verify host key", "SHA256:verified", "OpenSSH"} {
-		if !strings.Contains(model.View().Content, want) {
-			t.Errorf("host key view does not contain %q: %q", want, model.View().Content)
-		}
-	}
-	model, execCmd := runUpdate(t, model, press("enter"))
-	if execCmd == nil || model.phase != phaseAttaching || execCalls != 1 {
-		t.Fatalf("confirmed host key phase/cmd/exec = (%v, %v, %d)", model.phase, execCmd, execCalls)
-	}
-}
-
-func TestHostKeyCancellationRefreshesAfterSSHMutation(t *testing.T) {
-	t.Parallel()
-
-	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return rows, nil }}
-	operations := &fakeSpriteOperations{
-		fakeOperations: base,
-		spritePrepareFn: func(_ context.Context, name string, _ catalog.SpriteTransport, _ int) (catalog.PreparedAttach, error) {
-			return catalog.PrepareSpriteSSH(name, sprites.Prepared{Port: 41234, Fingerprint: "SHA256:verified"})
-		},
-	}
-	model := readySpriteModel(t, operations)
-	model, _ = runUpdate(t, model, press("enter"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, _ = runUpdate(t, model, runCmd(t, prepareCmd))
-	if model.phase != phaseConfirmingHostKey {
-		t.Fatalf("phase = %v, want host-key confirmation", model.phase)
-	}
-	model, refreshCmd := runUpdate(t, model, press("esc"))
-	if refreshCmd == nil || model.phase != phaseRefreshing || base.listCalls.Load() != 1 {
-		t.Fatalf("cancel phase/list/cmd = (%v, %d, %v), want refreshing/1/non-nil", model.phase, base.listCalls.Load(), refreshCmd)
-	}
-	model, duplicate := runUpdate(t, model, press("esc"))
-	if duplicate != nil {
-		t.Fatal("host-key cancel started a second refresh")
-	}
-	_ = runCmd(t, refreshCmd)
-	if base.listCalls.Load() != 2 {
-		t.Fatalf("list calls = %d, want 2", base.listCalls.Load())
-	}
-}
-
-func TestAttachSuccessAndFailureEachStartExactlyOneRefresh(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		name      string
-		attachErr error
-	}{
-		{name: "success"},
-		{name: "failure", attachErr: errors.New("child exit status 9")},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			operations := &fakeOperations{}
-			model := readyModel(t, operations)
-			model, prepareCmd := runUpdate(t, model, press("enter"))
-			model.execProcess = func(_ *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
-				return func() tea.Msg { return callback(test.attachErr) }
-			}
-			model, execCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-			model, refreshCmd := runUpdate(t, model, runCmd(t, execCmd))
-			if refreshCmd == nil || model.phase != phaseRefreshing {
-				t.Fatalf("matching attach completion did not start refresh")
-			}
-			if operations.listCalls.Load() != 1 {
-				t.Fatalf("list ran before refresh command: calls = %d", operations.listCalls.Load())
-			}
-
-			attachID := model.operationID - 1
-			var duplicate tea.Cmd
-			model, duplicate = runUpdate(t, model, attachDone{opID: attachID, err: test.attachErr})
-			if duplicate != nil {
-				t.Fatal("duplicate attach completion started another refresh")
-			}
-			_ = runCmd(t, refreshCmd)
-			if operations.listCalls.Load() != 2 {
-				t.Fatalf("list calls after one refresh command = %d, want 2", operations.listCalls.Load())
-			}
-			if test.attachErr != nil && !strings.Contains(model.View().Content, "Attach failed: child exit status 9") {
-				t.Fatalf("refreshing view lost attach failure: %q", model.View().Content)
-			}
-		})
-	}
-}
-
-func TestFailedRefreshAfterAttachKeepsRowsNoticeAndDisablesAttachUntilRetry(t *testing.T) {
-	t.Parallel()
-
-	refreshFailure := errors.New("local inventory unavailable")
-	operations := &fakeOperations{listFn: func(_ context.Context, call int) ([]catalog.Destination, error) {
-		if call == 2 {
-			return nil, refreshFailure
-		}
-		return testDestinations(), nil
-	}}
-	model := readyModel(t, operations)
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model.execProcess = func(_ *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
-		return func() tea.Msg { return callback(errors.New("attach broke")) }
-	}
-	model, execCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	model, refreshCmd := runUpdate(t, model, runCmd(t, execCmd))
-	if content := model.View().Content; !strings.Contains(content, "Attach failed: attach broke") {
-		t.Fatalf("refresh view = %q, want attach failure", content)
-	}
-	model, _ = runUpdate(t, model, runCmd(t, refreshCmd))
-	if model.phase != phaseReady || model.attachEnabled || len(model.destinations) != 2 {
-		t.Fatalf("failed refresh phase/enabled/rows = (%v, %v, %d), want ready/false/2", model.phase, model.attachEnabled, len(model.destinations))
-	}
-	content := model.View().Content
-	for _, want := range []string{"default", "alpha", "Attach failed: attach broke", "Refresh failed: local inventory unavailable", "retry"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("failed refresh view %q does not contain %q", content, want)
-		}
-	}
-	if _, attachCmd := runUpdate(t, model, press("enter")); attachCmd != nil {
-		t.Fatal("enter attached while refresh failure disabled attach")
-	}
-
-	model, retryCmd := runUpdate(t, model, press("r"))
-	model, _ = runUpdate(t, model, runCmd(t, retryCmd))
-	if !model.attachEnabled || model.phase != phaseReady {
-		t.Fatalf("successful retry phase/enabled = (%v, %v), want ready/true", model.phase, model.attachEnabled)
-	}
-}
-
-func TestInitialInventoryPartialSuccessShowsLoadedRowsAndWarning(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeSpriteOperations{
-		fakeOperations: &fakeOperations{},
-		inventoryFn: func(context.Context, int) catalog.Inventory {
-			return catalog.Inventory{
-				Local:   catalog.SourceResult{Rows: testDestinations()},
-				Sprites: catalog.SourceResult{Err: errors.New("token rejected")},
-			}
-		},
-	}
-	model := readySpriteModel(t, operations)
-	if !model.attachEnabled || model.spriteCreateEnabled || len(model.destinations) != 2 {
-		t.Fatalf("partial load enabled/create/rows = (%v, %v, %d)", model.attachEnabled, model.spriteCreateEnabled, len(model.destinations))
-	}
-	content := model.View().Content
-	for _, want := range []string{"default", "alpha", "Sprite load failed: token rejected"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("partial load view %q does not contain %q", content, want)
-		}
-	}
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	if prepareCmd == nil || model.phase != phasePreparing {
-		t.Fatalf("current local selection phase/cmd = (%v, %v), want preparing/non-nil", model.phase, prepareCmd)
-	}
-}
-
-func TestSpriteRefreshFailureKeepsCurrentLocalRowsAttachable(t *testing.T) {
-	t.Parallel()
-
-	spriteRows := mustSpriteDestinations(t, sprites.Sprite{Name: "devbox", State: sprites.Cold})
-	operations := &fakeSpriteOperations{
-		fakeOperations: &fakeOperations{},
-		inventoryFn: func(_ context.Context, call int) catalog.Inventory {
-			result := catalog.Inventory{
-				Local: catalog.SourceResult{Rows: testDestinations()},
-			}
-			if call == 1 {
-				result.Sprites.Rows = spriteRows
-			} else {
-				result.Sprites.Err = errors.New("provider unavailable")
-			}
-			return result
-		},
-	}
-	model := readySpriteModel(t, operations)
-	model, refreshCmd := runUpdate(t, model, press("r"))
-	model, _ = runUpdate(t, model, runCmd(t, refreshCmd))
-
-	if model.phase != phaseReady || !model.attachEnabled || model.spriteCreateEnabled {
-		t.Fatalf("Sprite failure phase/attach/create = (%v, %v, %v)", model.phase, model.attachEnabled, model.spriteCreateEnabled)
-	}
-	content := model.View().Content
-	for _, want := range []string{"default", "devbox", "stale", "Sprite refresh failed: provider unavailable"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("Sprite failure view %q does not contain %q", content, want)
-		}
-	}
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	if prepareCmd == nil || model.phase != phasePreparing {
-		t.Fatalf("current local selection phase/cmd = (%v, %v), want preparing/non-nil", model.phase, prepareCmd)
-	}
-}
-
-func TestLocalRefreshFailureKeepsCurrentSpriteRowsAttachable(t *testing.T) {
-	t.Parallel()
-
-	spriteRows := mustSpriteDestinations(t, sprites.Sprite{Name: "devbox", State: sprites.Running})
-	operations := &fakeSpriteOperations{
-		fakeOperations: &fakeOperations{},
-		inventoryFn: func(_ context.Context, call int) catalog.Inventory {
-			result := catalog.Inventory{Sprites: catalog.SourceResult{Rows: spriteRows}}
-			if call == 1 {
-				result.Local.Rows = testDestinations()
-			} else {
-				result.Local.Err = errors.New("Herdr unavailable")
-			}
-			return result
-		},
-	}
-	model := readySpriteModel(t, operations)
-	model, _ = runUpdate(t, model, press("down"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, refreshCmd := runUpdate(t, model, press("r"))
-	model, _ = runUpdate(t, model, runCmd(t, refreshCmd))
-
-	if model.phase != phaseReady || !model.attachEnabled || !model.spriteCreateEnabled {
-		t.Fatalf("local failure phase/attach/create = (%v, %v, %v)", model.phase, model.attachEnabled, model.spriteCreateEnabled)
-	}
-	content := model.View().Content
-	for _, want := range []string{"default", "stale", "devbox", "running", "Local refresh failed: Herdr unavailable"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("local failure view %q does not contain %q", content, want)
-		}
-	}
-	model, cmd := runUpdate(t, model, press("enter"))
-	if cmd != nil || model.phase != phaseChoosingSpriteTransport {
-		t.Fatalf("current Sprite selection phase/cmd = (%v, %v), want chooser/nil", model.phase, cmd)
-	}
-}
-
-func TestStaleInventoryRowsCannotAttach(t *testing.T) {
-	t.Parallel()
-
-	spriteRows := mustSpriteDestinations(t, sprites.Sprite{Name: "devbox", State: sprites.Cold})
-	operations := &fakeSpriteOperations{
-		fakeOperations: &fakeOperations{},
-		inventoryFn: func(_ context.Context, call int) catalog.Inventory {
-			result := catalog.Inventory{Local: catalog.SourceResult{Rows: testDestinations()}}
-			if call == 1 {
-				result.Sprites.Rows = spriteRows
-			} else {
-				result.Sprites.Err = errors.New("provider unavailable")
-			}
-			return result
-		},
-	}
-	model := readySpriteModel(t, operations)
-	model, refreshCmd := runUpdate(t, model, press("r"))
-	model, _ = runUpdate(t, model, runCmd(t, refreshCmd))
-	model, _ = runUpdate(t, model, press("down"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, attachCmd := runUpdate(t, model, press("enter"))
-
-	if attachCmd != nil || model.phase != phaseReady {
-		t.Fatalf("stale attach phase/cmd = (%v, %v), want ready/nil", model.phase, attachCmd)
-	}
-	if operations.spritePrepareCalls.Load() != 0 || operations.prepareCalls.Load() != 0 {
-		t.Fatalf("stale attach prepare calls = Sprite %d, local %d", operations.spritePrepareCalls.Load(), operations.prepareCalls.Load())
-	}
-	if !strings.Contains(model.View().Content, "stale") || strings.Contains(model.readyHelp(), keyHint("enter", "attach")) {
-		t.Fatalf("stale selection did not render as disabled: %q", model.View().Content)
-	}
-}
-
-func TestSuccessfulSourceRecoveryReplacesAndReenablesStaleRows(t *testing.T) {
-	t.Parallel()
-
-	oldRows := mustSpriteDestinations(t, sprites.Sprite{Name: "oldbox", State: sprites.Cold})
-	newRows := mustSpriteDestinations(t, sprites.Sprite{Name: "newbox", State: sprites.Running})
-	operations := &fakeSpriteOperations{
-		fakeOperations: &fakeOperations{},
-		inventoryFn: func(_ context.Context, call int) catalog.Inventory {
-			result := catalog.Inventory{Local: catalog.SourceResult{Rows: testDestinations()}}
-			switch call {
-			case 1:
-				result.Sprites.Rows = oldRows
-			case 2:
-				result.Sprites.Err = errors.New("provider unavailable")
-			default:
-				result.Sprites.Rows = newRows
-			}
-			return result
-		},
-	}
-	model := readySpriteModel(t, operations)
-	model, failedCmd := runUpdate(t, model, press("r"))
-	model, _ = runUpdate(t, model, runCmd(t, failedCmd))
-	if content := model.View().Content; !strings.Contains(content, "oldbox") || !strings.Contains(content, "stale") {
-		t.Fatalf("failed refresh did not retain stale Sprite: %q", content)
-	}
-
-	model, recoveryCmd := runUpdate(t, model, press("r"))
-	model, _ = runUpdate(t, model, runCmd(t, recoveryCmd))
-	content := model.View().Content
-	if strings.Contains(content, "oldbox") || strings.Contains(content, "stale") || !strings.Contains(content, "newbox") {
-		t.Fatalf("recovery view did not replace stale Sprite: %q", content)
-	}
-	if !model.spriteCreateEnabled || !model.attachEnabled || !model.spriteSnapshot.current {
-		t.Fatalf("recovery attach/create/current = (%v, %v, %v)", model.attachEnabled, model.spriteCreateEnabled, model.spriteSnapshot.current)
-	}
-	model, _ = runUpdate(t, model, press("down"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, cmd := runUpdate(t, model, press("enter"))
-	if cmd != nil || model.phase != phaseChoosingSpriteTransport {
-		t.Fatalf("recovered Sprite selection phase/cmd = (%v, %v), want chooser/nil", model.phase, cmd)
-	}
-}
-
-func TestNoInventorySourceLoadedInitiallyEntersInitialLoadFailed(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeSpriteOperations{
-		fakeOperations: &fakeOperations{},
-		inventoryFn: func(context.Context, int) catalog.Inventory {
-			return catalog.Inventory{
-				Local:   catalog.SourceResult{Err: errors.New("Herdr unavailable")},
-				Sprites: catalog.SourceResult{Err: errors.New("provider unavailable")},
-			}
-		},
-	}
-	model := New(context.Background(), operations)
-	model, cmd := runUpdate(t, model, runCmd(t, model.Init()))
-	if cmd != nil || model.phase != phaseInitialLoadFailed || model.attachEnabled || model.spriteCreateEnabled || len(model.destinations) != 0 {
-		t.Fatalf("initial total failure cmd/phase/attach/create/rows = (%v, %v, %v, %v, %d)", cmd, model.phase, model.attachEnabled, model.spriteCreateEnabled, len(model.destinations))
-	}
-	for _, want := range []string{"Couldn’t load destinations", "Herdr unavailable", "provider unavailable", "retry"} {
-		if content := model.View().Content; !strings.Contains(content, want) {
-			t.Errorf("initial total failure view %q does not contain %q", content, want)
-		}
-	}
-}
-
-func TestInitialFailureRetriesAndStaleCompletionCannotReplaceRetry(t *testing.T) {
-	t.Parallel()
-
-	failure := errors.New("herdr missing")
-	operations := &fakeOperations{listFn: func(_ context.Context, call int) ([]catalog.Destination, error) {
-		if call == 1 {
-			return nil, failure
-		}
-		return testDestinations(), nil
-	}}
-	model := New(context.Background(), operations)
-	firstID := model.operationID
-	model, _ = runUpdate(t, model, runCmd(t, model.Init()))
-	if model.phase != phaseInitialLoadFailed || model.attachEnabled {
-		t.Fatalf("initial failure phase/enabled = (%v, %v)", model.phase, model.attachEnabled)
-	}
-	for _, want := range []string{"Couldn’t load destinations", "herdr missing", "retry"} {
-		if !strings.Contains(model.View().Content, want) {
-			t.Errorf("failure view %q does not contain %q", model.View().Content, want)
-		}
-	}
-
-	model, retryCmd := runUpdate(t, model, press("r"))
-	if model.phase != phaseLoading || model.operationID <= firstID || retryCmd == nil {
-		t.Fatalf("retry phase/id/cmd = (%v, %d, %v)", model.phase, model.operationID, retryCmd)
-	}
-	retryID := model.operationID
-	model, staleCmd := runUpdate(t, model, listDone{opID: firstID, destinations: nil})
-	if staleCmd != nil || model.phase != phaseLoading || model.operationID != retryID {
-		t.Fatal("stale initial completion changed retry load")
-	}
-	model, _ = runUpdate(t, model, runCmd(t, retryCmd))
-	if model.phase != phaseReady || !model.attachEnabled {
-		t.Fatalf("retry completion phase/enabled = (%v, %v), want ready/true", model.phase, model.attachEnabled)
-	}
-}
-
-func TestStalePreparationAndAttachmentCompletionsDoNothing(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeOperations{}
-	model := readyModel(t, operations)
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	preparingID := model.operationID
-	model, cmd := runUpdate(t, model, prepareDone{opID: preparingID - 1})
-	if cmd != nil || model.phase != phasePreparing {
-		t.Fatal("stale prepare completion changed phase")
-	}
-
-	model.execProcess = func(_ *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
-		return func() tea.Msg { return callback(nil) }
-	}
-	model, _ = runUpdate(t, model, runCmd(t, prepareCmd))
-	if model.phase != phaseAttaching {
-		t.Fatalf("phase = %v, want attaching", model.phase)
-	}
-	model, cmd = runUpdate(t, model, attachDone{opID: preparingID - 1})
-	if cmd != nil || model.phase != phaseAttaching {
-		t.Fatal("stale attach completion changed phase")
-	}
-	for _, action := range []string{"r", "enter"} {
-		var ignored tea.Cmd
-		model, ignored = runUpdate(t, model, press(action))
-		if ignored != nil || model.phase != phaseAttaching {
-			t.Fatalf("attaching handled launcher key %q", action)
-		}
-	}
-	for _, action := range []string{"q", "ctrl+c"} {
-		quitting, quitCmd := runUpdate(t, model, press(action))
-		assertQuitCmd(t, quitCmd)
-		if !quitting.quitting {
-			t.Fatalf("attaching did not honor %q after terminal restore", action)
-		}
-	}
-}
-
-func TestQuitCancelsBlockedListAndPreparation(t *testing.T) {
-	t.Parallel()
-
-	t.Run("initial list with q", func(t *testing.T) {
-		t.Parallel()
-		assertBlockedListCanceled(t, "q")
-	})
-	t.Run("initial list with ctrl+c", func(t *testing.T) {
-		t.Parallel()
-		assertBlockedListCanceled(t, "ctrl+c")
-	})
-	t.Run("preparation", func(t *testing.T) {
-		t.Parallel()
-
-		started := make(chan struct{})
-		operations := &fakeOperations{prepareFn: func(ctx context.Context, _ catalog.Destination, _ int) (catalog.PreparedAttach, error) {
-			close(started)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		}}
-		model := readyModel(t, operations)
-		model, prepareCmd := runUpdate(t, model, press("enter"))
-		done := runCmdAsync(prepareCmd)
-		awaitSignal(t, started, "preparation start")
-
-		quitting, quitCmd := runUpdate(t, model, press("q"))
-		assertQuitCmd(t, quitCmd)
-		message := awaitMessage(t, done, "canceled preparation")
-		completion, ok := message.(prepareDone)
-		if !ok || !errors.Is(completion.err, context.Canceled) {
-			t.Fatalf("preparation completion = %#v, want context cancellation", message)
-		}
-		quitting, staleCmd := runUpdate(t, quitting, completion)
-		if staleCmd != nil || !quitting.quitting || quitting.phase != phasePreparing {
-			t.Fatal("completion arriving after preparation cancellation changed the model")
-		}
-	})
-}
-
-func TestRefreshQuitCancelsBlockedListing(t *testing.T) {
-	t.Parallel()
-
+func TestInventoryRefreshKeepsReadyInteractionsAndCancelsOnNewEffect(t *testing.T) {
 	started := make(chan struct{})
-	operations := &fakeOperations{listFn: func(ctx context.Context, call int) ([]catalog.Destination, error) {
+	ops := &fakeOperations{}
+	ops.inventoryFn = func(ctx context.Context, call int) catalog.Inventory {
 		if call == 1 {
-			return testDestinations(), nil
+			return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Skipped: true}}
 		}
 		close(started)
 		<-ctx.Done()
-		return nil, ctx.Err()
-	}}
-	model := readyModel(t, operations)
-	model, refreshCmd := runUpdate(t, model, press("r"))
-	done := runCmdAsync(refreshCmd)
-	awaitSignal(t, started, "refresh start")
-	quitting, quitCmd := runUpdate(t, model, press("ctrl+c"))
-	assertQuitCmd(t, quitCmd)
-	completion := awaitMessage(t, done, "canceled refresh").(listDone)
-	if !errors.Is(completion.err, context.Canceled) {
-		t.Fatalf("refresh error = %v, want context.Canceled", completion.err)
+		return catalog.Inventory{Local: catalog.SourceResult{Err: ctx.Err()}, Sprites: catalog.SourceResult{Skipped: true}}
 	}
-	quitting, staleCmd := runUpdate(t, quitting, completion)
-	if staleCmd != nil || !quitting.quitting || quitting.phase != phaseRefreshing {
-		t.Fatal("completion arriving after refresh cancellation changed the model")
+	model := ready(t, ops)
+	model, refresh := update(t, model, refreshTick(time.Now()))
+	if model.phase != phaseReady || !model.inventoryRefreshing || !strings.Contains(model.View().Content, "Refreshing local") {
+		t.Fatalf("refresh blocked view = phase %v refreshing %v view %q", model.phase, model.inventoryRefreshing, model.View().Content)
+	}
+	model, _ = update(t, model, press("down"))
+	if selected(t, model).Label != "alpha" {
+		t.Fatal("list navigation froze during inventory refresh")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- runFirst(t, refresh) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("refresh did not start")
+	}
+	model, prepare := update(t, model, press("enter"))
+	if model.phase != phasePreparing || model.inventoryRefreshing || prepare == nil {
+		t.Fatalf("new effect did not supersede refresh = phase %v refreshing %v cmd %v", model.phase, model.inventoryRefreshing, prepare)
+	}
+	select {
+	case completion := <-done:
+		model, stale := update(t, model, completion)
+		if stale != nil || model.phase != phasePreparing {
+			t.Fatal("canceled refresh completion changed active effect")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("superseded refresh was not canceled")
 	}
 }
 
-func TestSpriteNameAllowsQAndOnlyControlCQuits(t *testing.T) {
-	t.Parallel()
-	model := readyModel(t, &fakeOperations{})
-	model.phase = phaseNamingSprite
-	model, cmd := runUpdate(t, model, press("q"))
-	if cmd != nil || model.quitting || model.spriteName != "q" {
-		t.Fatalf("name entry after q = (cmd %v, quitting %v, name %q)", cmd, model.quitting, model.spriteName)
+func TestNavigationBetweenEndpointAndSpriteScreensResetsFilter(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := ready(t, ops)
+	model.browser.SetFilterText("devbox")
+	model, load := update(t, model, press("enter"))
+	if model.browser.FilterValue() != "" || model.browser.SettingFilter() {
+		t.Fatalf("endpoint filter survived drill-in = setting %v query %q", model.browser.SettingFilter(), model.browser.FilterValue())
 	}
-	_, quitCmd := runUpdate(t, model, press("ctrl+c"))
-	assertQuitCmd(t, quitCmd)
+	model, _ = update(t, model, runFirst(t, load))
+	model.browser.SetFilterText("work")
+	model, _ = update(t, model, press("esc"))
+	if model.screen != screenEndpoints || model.browser.FilterValue() != "" || model.browser.SettingFilter() {
+		t.Fatalf("Sprite filter survived back navigation = screen %v setting %v query %q", model.screen, model.browser.SettingFilter(), model.browser.FilterValue())
+	}
 }
 
-func TestFilteringMakesQEditableAndOnlyControlCQuits(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeOperations{}
-	model := readyModel(t, operations)
-	model, cmd := runUpdate(t, model, press("/"))
-	if cmd != nil || !model.editingFilter {
-		t.Fatal("/ did not enter filter editing")
+func TestSpriteRefreshPreservesAppliedFilter(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := spriteReady(t, ops)
+	model.browser.SetFilterText("work")
+	if model.browser.FilterValue() != "work" || len(model.browser.VisibleItems()) != 1 {
+		t.Fatalf("initial filter = %q with %d items", model.browser.FilterValue(), len(model.browser.VisibleItems()))
 	}
-	for _, input := range []string{"q", "r", "/", "?"} {
-		model, cmd = runUpdate(t, model, press(input))
-		if cmd != nil || !model.editingFilter {
-			t.Fatalf("filter input %q quit or stopped editing", input)
+
+	model, refresh := update(t, model, press("r"))
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.browser.FilterValue() != "work" || len(model.browser.VisibleItems()) != 1 || selected(t, model).Label != "work" {
+		t.Fatalf("filter after Sprite refresh = %q with %d items, selection %q", model.browser.FilterValue(), len(model.browser.VisibleItems()), selected(t, model).Label)
+	}
+}
+
+func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := ready(t, ops)
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	if model.screen != screenSprite || model.phase != phaseLoadingSprite || load == nil || ops.listSpriteCalls.Load() != 0 {
+		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.phase, model.screen, ops.listSpriteCalls.Load(), load)
+	}
+	for _, want := range []string{"Waking devbox", "checking Herdr", "three minutes"} {
+		if !strings.Contains(model.View().Content, want) {
+			t.Errorf("loading copy lacks %q: %q", want, model.View().Content)
 		}
 	}
-	if model.filter != "qr/?" {
-		t.Fatalf("filter = %q, want %q", model.filter, "qr/?")
+	model, _ = update(t, model, runFirst(t, load))
+	if model.phase != phaseReady || len(model.browser.Items()) != 2 || ops.listSpriteCalls.Load() != 1 || ops.prepareSpriteCalls.Load() != 0 {
+		t.Fatalf("detail state/items/list/prepare = %v/%d/%d/%d", model.phase, len(model.browser.Items()), ops.listSpriteCalls.Load(), ops.prepareSpriteCalls.Load())
 	}
-	if !strings.Contains(model.View().Content, "ctrl+c") {
-		t.Fatalf("filter view = %q", model.View().Content)
-	}
-	model, _ = runUpdate(t, model, press("enter"))
-	if model.editingFilter || model.phase != phaseReady {
-		t.Fatal("filter enter attached instead of applying filter")
-	}
-
-	model, _ = runUpdate(t, model, press("/"))
-	_, quitCmd := runUpdate(t, model, press("ctrl+c"))
-	assertQuitCmd(t, quitCmd)
-
-	plain := readyModel(t, &fakeOperations{})
-	_, quitCmd = runUpdate(t, plain, press("q"))
-	assertQuitCmd(t, quitCmd)
-}
-
-func TestHelpAndFilterKeysHaveTheirDocumentedActions(t *testing.T) {
-	t.Parallel()
-
-	model := readyModel(t, &fakeOperations{})
-	model, _ = runUpdate(t, model, press("?"))
-	if !model.showHelp || !strings.Contains(model.View().Content, "close help") {
-		t.Fatalf("? did not open help: %q", model.View().Content)
-	}
-	model, _ = runUpdate(t, model, press("/"))
-	for _, letter := range []string{"a", "l", "p", "h", "a"} {
-		model, _ = runUpdate(t, model, press(letter))
-	}
-	model, _ = runUpdate(t, model, press("enter"))
-	visible := model.visibleDestinations()
-	if len(visible) != 1 || visible[0].Label != "alpha" {
-		t.Fatalf("filtered destinations = %#v, want alpha", visible)
+	for _, want := range []string{"default", "running", "work", "stopped"} {
+		if !strings.Contains(model.View().Content, want) {
+			t.Errorf("detail view lacks %q: %q", want, model.View().Content)
+		}
 	}
 }
 
-func TestMultipleAgentKeysRequireOneSelectionBeforeRetry(t *testing.T) {
-	t.Parallel()
-	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
+func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.listSpriteFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, call int) ([]catalog.Destination, error) {
+		if call == 1 {
+			return nil, catalog.ErrSpriteHerdrMissing
+		}
+		return spriteSessionRows("devbox", sprites.Running), nil
+	}
+	model := ready(t, ops)
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	model, _ = update(t, model, runFirst(t, load))
+	if model.phase != phaseConfirmingSpriteInstall || ops.installCalls.Load() != 0 {
+		t.Fatalf("missing Herdr phase/install calls = %v/%d", model.phase, ops.installCalls.Load())
+	}
+	for _, want := range []string{"Install Herdr", "download and run", "https://herdr.dev/install.sh"} {
+		if !strings.Contains(model.View().Content, want) {
+			t.Errorf("install confirmation lacks %q: %q", want, model.View().Content)
+		}
+	}
+	model, cmd := update(t, model, press("n"))
+	if cmd != nil || model.screen != screenEndpoints || model.phase != phaseReady || ops.installCalls.Load() != 0 {
+		t.Fatalf("install rejection = screen %v phase %v calls %d cmd %v", model.screen, model.phase, ops.installCalls.Load(), cmd)
+	}
+
+	model.browser.Select(2)
+	model, load = update(t, model, press("enter"))
+	ops.listSpriteFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, _ int) ([]catalog.Destination, error) {
+		return nil, catalog.ErrSpriteHerdrMissing
+	}
+	model, _ = update(t, model, runFirst(t, load))
+	model, install := update(t, model, press("y"))
+	if model.phase != phaseInstallingSpriteHerdr || install == nil || ops.installCalls.Load() != 0 {
+		t.Fatalf("install start = phase %v calls %d cmd %v", model.phase, ops.installCalls.Load(), install)
+	}
+	ops.listSpriteFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, _ int) ([]catalog.Destination, error) {
+		return spriteSessionRows("devbox", sprites.Running), nil
+	}
+	model, relist := update(t, model, runFirst(t, install))
+	if model.phase != phaseLoadingSprite || relist == nil || ops.installCalls.Load() != 1 {
+		t.Fatalf("install completion = phase %v calls %d cmd %v", model.phase, ops.installCalls.Load(), relist)
+	}
+	model, _ = update(t, model, runFirst(t, relist))
+	if model.phase != phaseReady || len(model.browser.Items()) != 2 {
+		t.Fatalf("post-install list = phase %v items %d", model.phase, len(model.browser.Items()))
+	}
+}
+
+func TestSpriteDetailSnapshotIsResetAcrossEndpoints(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(context.Context, int) catalog.Inventory {
+		rows := append(spriteEndpointRows("alpha", sprites.Running), spriteEndpointRows("beta", sprites.Warm)...)
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: rows}}
+	}
+	ops.listSpriteFn = func(_ context.Context, endpoint catalog.SpriteEndpointSelection, _ int) ([]catalog.Destination, error) {
+		alpha, _ := catalog.SelectSpriteEndpoint(spriteEndpointRows("alpha", sprites.Running)[0])
+		if reflect.DeepEqual(endpoint, alpha) {
+			return spriteSessionRows("alpha", sprites.Running), nil
+		}
+		return nil, errors.New("beta unavailable")
+	}
+	model := ready(t, ops)
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	model, _ = update(t, model, runFirst(t, load))
+	if len(model.browser.Items()) != 2 {
+		t.Fatalf("alpha detail items = %d", len(model.browser.Items()))
+	}
+	model, _ = update(t, model, press("esc"))
+	model.browser.Select(3)
+	model, load = update(t, model, press("enter"))
+	if len(model.browser.Items()) != 0 || model.spriteSnapshotDetail.loaded {
+		t.Fatal("beta load exposed alpha snapshot")
+	}
+	model, _ = update(t, model, runFirst(t, load))
+	if model.phase != phaseReady || len(model.browser.Items()) != 0 || strings.Contains(model.View().Content, "default") {
+		t.Fatalf("failed beta detail leaked alpha rows: %q", model.View().Content)
+	}
+}
+
+func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		transport catalog.SpriteTransport
+		move      bool
+	}{
+		{"native", catalog.NativePreview, false},
+		{"ssh", catalog.SSHFallback, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+			terminal := &fakeTerminalCommand{}
+			ops.prepareSpriteFn = func(_ context.Context, selection catalog.SpriteSessionSelection, transport catalog.SpriteTransport, _ int) (catalog.PreparedAttach, error) {
+				if want := spriteSessionSelection("devbox", "work"); !reflect.DeepEqual(selection, want) || transport != tc.transport {
+					t.Fatalf("PrepareSprite selection/transport = %#v/%v", selection, transport)
+				}
+				if transport == catalog.NativePreview {
+					return catalog.PreparedNativeAttach{Command: terminal}, nil
+				}
+				return catalog.PrepareSpriteSSH("devbox", "work", sprites.Prepared{Port: 41234, SSHAuthSocket: "/tmp/hrd-agent"})
+			}
+			model := spriteReady(t, ops)
+			model.browser.Select(1)
+			model, _ = update(t, model, press("enter"))
+			if tc.move {
+				model, _ = update(t, model, press("down"))
+			}
+			var native tea.ExecCommand
+			var processArgs, processEnv []string
+			model.execCommand = func(command tea.ExecCommand, callback tea.ExecCallback) tea.Cmd {
+				native = command
+				return func() tea.Msg { return callback(nil) }
+			}
+			model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
+				processArgs = append([]string(nil), command.Args...)
+				processEnv = append([]string(nil), command.Env...)
+				return func() tea.Msg { return callback(nil) }
+			}
+			model, prepare := update(t, model, press("enter"))
+			if model.phase != phasePreparing || prepare == nil {
+				t.Fatalf("prepare phase/cmd = %v/%v", model.phase, prepare)
+			}
+			model, handoff := update(t, model, runFirst(t, prepare))
+			if model.phase != phaseAttaching || handoff == nil {
+				t.Fatalf("handoff phase/cmd = %v/%v", model.phase, handoff)
+			}
+			if tc.transport == catalog.NativePreview {
+				if native != terminal || len(processArgs) != 0 {
+					t.Fatalf("native handoff = %T, process args %#v", native, processArgs)
+				}
+			} else {
+				want := []string{"herdr", "--remote", "ssh://sprite@127.0.0.1:41234", "--session", "work"}
+				if !reflect.DeepEqual(processArgs, want) {
+					t.Fatalf("SSH Herdr args = %#v, want %#v", processArgs, want)
+				}
+				if !contains(processEnv, "SSH_AUTH_SOCK=/tmp/hrd-agent") || containsPrefix(processEnv, "SPRITE_TOKEN=") {
+					t.Fatalf("SSH child environment = %#v", processEnv)
+				}
+			}
+		})
+	}
+}
+
+func TestStopErrorInvalidatesUntilSpriteRefreshReconciles(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.stopFn = func(context.Context, catalog.SpriteSessionSelection, int) error {
+		return errors.New("stop response lost")
+	}
+	model := spriteReady(t, ops)
+	model, _ = update(t, model, press("s"))
+	model, stop := update(t, model, press("y"))
+	model, refresh := update(t, model, runFirst(t, stop))
+	if model.phase != phaseRefreshingSprite || model.spriteSnapshotDetail.current || refresh == nil {
+		t.Fatalf("stop error state = phase %v current %v cmd %v", model.phase, model.spriteSnapshotDetail.current, refresh)
+	}
+	if !strings.Contains(model.notice, "stop response lost") || strings.Contains(model.helpView(), "stop") || strings.Contains(model.helpView(), "restart") {
+		t.Fatalf("stop error notice/help = %q/%q", model.notice, model.helpView())
+	}
+
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.phase != phaseReady || !model.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "stop response lost") {
+		t.Fatalf("reconciled stop error = phase %v current %v view %q", model.phase, model.spriteSnapshotDetail.current, model.View().Content)
+	}
+}
+
+func TestStopConfirmationAndRestartComposeStopThenAttach(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := spriteReady(t, ops)
+	model, cmd := update(t, model, press("s"))
+	if cmd != nil || model.phase != phaseConfirmingStop || model.restart {
+		t.Fatalf("stop confirmation = phase %v restart %v cmd %v", model.phase, model.restart, cmd)
+	}
+	if !strings.Contains(model.View().Content, "Pane processes in this session will exit") {
+		t.Fatalf("confirmation lacks process warning: %q", model.View().Content)
+	}
+	model, _ = update(t, model, press("n"))
+	if model.phase != phaseReady || ops.stopCalls.Load() != 0 {
+		t.Fatal("cancel stopped the session")
+	}
+
+	model, _ = update(t, model, press("R"))
+	model, stop := update(t, model, press("y"))
+	if stop != nil || model.phase != phaseChoosingSpriteTransport || ops.stopCalls.Load() != 0 {
+		t.Fatalf("restart transport choice = calls %d phase %v cmd %v", ops.stopCalls.Load(), model.phase, stop)
+	}
+	model, stop = update(t, model, press("enter"))
+	model, follow := update(t, model, runFirst(t, stop))
+	if follow == nil || ops.stopCalls.Load() != 1 || model.phase != phasePreparing || model.spriteSnapshotDetail.current {
+		t.Fatalf("restart composition = calls %d phase %v current %v cmd %v", ops.stopCalls.Load(), model.phase, model.spriteSnapshotDetail.current, follow)
+	}
+}
+
+func TestRestartTransportCancelDoesNotStopAndPrepareFailureRefreshesWithNotice(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
+		return nil, errors.New("native setup failed")
+	}
+	model := spriteReady(t, ops)
+	model, _ = update(t, model, press("R"))
+	model, _ = update(t, model, press("y"))
+	model, cmd := update(t, model, press("esc"))
+	if cmd != nil || model.phase != phaseReady || ops.stopCalls.Load() != 0 {
+		t.Fatalf("transport cancel = phase %v stops %d cmd %v", model.phase, ops.stopCalls.Load(), cmd)
+	}
+
+	model, _ = update(t, model, press("R"))
+	model, _ = update(t, model, press("y"))
+	model, stop := update(t, model, press("enter"))
+	model, prepare := update(t, model, runFirst(t, stop))
+	if model.spriteSnapshotDetail.current || model.phase != phasePreparing || prepare == nil {
+		t.Fatalf("post-stop invalidation = current %v phase %v cmd %v", model.spriteSnapshotDetail.current, model.phase, prepare)
+	}
+	model, refresh := update(t, model, runFirst(t, prepare))
+	if model.phase != phaseRefreshingSprite || refresh == nil || !strings.Contains(model.notice, "native setup failed") {
+		t.Fatalf("prepare failure refresh = phase %v notice %q cmd %v", model.phase, model.notice, refresh)
+	}
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.phase != phaseReady || !model.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "native setup failed") {
+		t.Fatalf("post-failure refresh = phase %v current %v view %q", model.phase, model.spriteSnapshotDetail.current, model.View().Content)
+	}
+}
+
+func TestAttachFailureNoticeSurvivesAutomaticRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		transport catalog.SpriteTransport
+	}{
+		{name: "native", transport: catalog.NativePreview},
+		{name: "process", transport: catalog.SSHFallback},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SPRITE_TOKEN", "must-not-reach-child")
+			ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+			ops.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
+				if tc.transport == catalog.NativePreview {
+					return catalog.PreparedNativeAttach{Command: &fakeTerminalCommand{}}, nil
+				}
+				return catalog.PrepareSpriteSSH("devbox", "default", sprites.Prepared{Port: 22})
+			}
+			model := spriteReady(t, ops)
+			model, _ = update(t, model, press("enter"))
+			if tc.transport == catalog.SSHFallback {
+				model, _ = update(t, model, press("down"))
+			}
+			model.execCommand = func(tea.ExecCommand, tea.ExecCallback) tea.Cmd {
+				return func() tea.Msg {
+					return attachDone{opID: model.operationID, err: errors.New("native control failure\nunsafe")}
+				}
+			}
+			model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
+				if containsPrefix(command.Env, "SPRITE_TOKEN=") {
+					t.Fatalf("process environment contains SPRITE_TOKEN: %#v", command.Env)
+				}
+				return func() tea.Msg { return callback(errors.New("process control failure\nunsafe")) }
+			}
+			model, prepare := update(t, model, press("enter"))
+			model, attach := update(t, model, runFirst(t, prepare))
+			model, refresh := update(t, model, run(t, attach))
+			if model.phase != phaseRefreshingSprite || refresh == nil || !strings.Contains(model.notice, "control failureunsafe") {
+				t.Fatalf("attach failure = phase %v notice %q cmd %v", model.phase, model.notice, refresh)
+			}
+			model, _ = update(t, model, runFirst(t, refresh))
+			if !strings.Contains(model.View().Content, "control failureunsafe") {
+				t.Fatalf("successful refresh cleared attach failure: %q", model.View().Content)
+			}
+		})
+	}
+}
+
+func TestSpriteDetailShowsSharedObservationAgeWithoutPolling(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	observed := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	model := ready(t, ops)
+	model.now = func() time.Time { return observed }
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	model, _ = update(t, model, runFirst(t, load))
+	model.now = func() time.Time { return observed.Add(65 * time.Second) }
+
+	content := model.View().Content
+	if strings.Count(content, "Herdr checked") != 1 || !strings.Contains(content, "Herdr checked 1m ago") {
+		t.Fatalf("detail observation line = %q", content)
+	}
+	calls := ops.listSpriteCalls.Load()
+	model, cmd := update(t, model, refreshTick(observed.Add(refreshInterval)))
+	if cmd == nil || model.phase != phaseReady || model.inventoryRefreshing || ops.listSpriteCalls.Load() != calls {
+		t.Fatalf("detail refresh tick polled = phase %v refreshing %v calls %d→%d cmd %v", model.phase, model.inventoryRefreshing, calls, ops.listSpriteCalls.Load(), cmd)
+	}
+}
+
+func TestBrowserLayoutUsesCompactSpacingAndConditionalPagination(t *testing.T) {
+	if got := (browserDelegate{}).Spacing(); got != 0 {
+		t.Fatalf("delegate spacing = %d, want 0", got)
+	}
+	sessions := make([]herdr.Session, 20)
+	for index := range sessions {
+		sessions[index] = herdr.Session{Name: fmt.Sprintf("session-%02d", index)}
+	}
+	rows, err := catalog.LocalDestinations(sessions)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ops := &fakeOperations{inventoryFn: func(context.Context, int) catalog.Inventory {
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: rows}, Sprites: catalog.SourceResult{Skipped: true}}
+	}}
+	model := ready(t, ops)
+	model, _ = update(t, model, tea.WindowSizeMsg{Width: 50, Height: 12})
+	if !model.browser.ShowPagination() || model.browser.Paginator.TotalPages <= 1 {
+		t.Fatalf("pagination = shown %v pages %d", model.browser.ShowPagination(), model.browser.Paginator.TotalPages)
+	}
+}
+
+func TestSpinnerProgressesAcrossBusyState(t *testing.T) {
+	model := New(context.Background(), &fakeOperations{})
+	before := model.spinner.View()
+	model, cmd := update(t, model, model.spinner.Tick())
+	if cmd == nil || model.spinner.View() == before {
+		t.Fatalf("spinner did not progress: before %q after %q cmd %v", before, model.spinner.View(), cmd)
+	}
+	if !strings.Contains(model.View().Content, model.spinner.View()) {
+		t.Fatalf("busy view does not render spinner: %q", model.View().Content)
+	}
+}
+
+func TestHelpOnlyShowsSelectionCapabilities(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := spriteReady(t, ops)
+	model.browser.Select(1)
+	if help := model.helpView(); !strings.Contains(help, "enter") || !strings.Contains(help, "move") || !strings.Contains(help, "filter") || strings.Contains(help, "restart") || strings.Contains(help, "stop") {
+		t.Fatalf("stopped-session help = %q", help)
+	}
+	model.spriteSnapshotDetail.current = false
+	model.syncSpriteItems(selected(t, model).ID)
+	if help := model.helpView(); strings.Contains(help, "enter") || strings.Contains(help, "restart") || strings.Contains(help, "stop") {
+		t.Fatalf("stale-session help exposes actions = %q", help)
+	}
+	for _, phase := range []phase{phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr} {
+		model.phase = phase
+		if help := model.helpView(); !strings.Contains(help, "esc") || !strings.Contains(help, "cancel") {
+			t.Errorf("phase %v help = %q", phase, help)
+		}
+	}
+}
+
+func TestHostKeyRequiresExplicitConfirmationAndCancelDropsPrepared(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.prepareSpriteFn = func(_ context.Context, _ catalog.SpriteSessionSelection, _ catalog.SpriteTransport, _ int) (catalog.PreparedAttach, error) {
+		return catalog.PrepareSpriteSSH("devbox", "default", sprites.Prepared{Port: 22, Fingerprint: "SHA256:verified"})
+	}
+	model := spriteReady(t, ops)
+	model, _ = update(t, model, press("enter"))
+	model, _ = update(t, model, press("down"))
+	execCalls := 0
+	model.execProcess = func(*exec.Cmd, tea.ExecCallback) tea.Cmd { execCalls++; return nil }
+	model, prepare := update(t, model, press("enter"))
+	model, cmd := update(t, model, runFirst(t, prepare))
+	if cmd != nil || model.phase != phaseConfirmingHostKey || execCalls != 0 || !strings.Contains(model.View().Content, "SHA256:verified") {
+		t.Fatalf("host confirmation = phase %v calls %d cmd %v view %q", model.phase, execCalls, cmd, model.View().Content)
+	}
+	model, refresh := update(t, model, press("esc"))
+	if model.prepared != nil || model.phase != phaseRefreshingSprite || refresh == nil {
+		t.Fatalf("cancel cleanup = prepared %v phase %v cmd %v", model.prepared, model.phase, refresh)
+	}
+}
+
+func TestSSHKeySelectionUsesExactlyOneKeyAndRetries(t *testing.T) {
 	selection := &sshagent.SelectionRequired{Source: "1Password", Identities: []sshagent.Identity{
 		{Fingerprint: "SHA256:work", Comment: "Work", Algorithm: "ssh-ed25519"},
 		{Fingerprint: "SHA256:personal", Comment: "Personal", Algorithm: "ssh-ed25519"},
 	}}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return spriteRows, nil }}
-	spriteOps := &fakeSpriteOperations{
-		fakeOperations: base,
-		spritePrepareFn: func(context.Context, string, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
-			return nil, selection
-		},
+	base := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	base.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
+		return nil, selection
 	}
-	operations := &fakeSSHKeyOperations{fakeSpriteOperations: spriteOps}
-	model := New(context.Background(), operations)
-	model, _ = runUpdate(t, model, runCmd(t, model.Init()))
-	model, _ = runUpdate(t, model, press("enter"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, cmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	if cmd != nil || model.phase != phaseChoosingSSHKey {
-		t.Fatalf("selection phase/cmd = (%v, %v)", model.phase, cmd)
+	ops := &fakeSSHOperations{fakeSpriteOperations: base}
+	model := spriteReady(t, ops)
+	model, _ = update(t, model, press("enter"))
+	model, _ = update(t, model, press("down"))
+	model, prepare := update(t, model, press("enter"))
+	model, _ = update(t, model, runFirst(t, prepare))
+	if model.phase != phaseChoosingSSHKey || !strings.Contains(model.View().Content, "Choose exactly one") {
+		t.Fatalf("SSH selection phase/view = %v/%q", model.phase, model.View().Content)
 	}
-	for _, want := range []string{"1Password", "Work", "Personal", "Only the selected public key"} {
-		if !strings.Contains(model.View().Content, want) {
-			t.Errorf("key picker does not contain %q: %q", want, model.View().Content)
-		}
-	}
-	model, _ = runUpdate(t, model, press("down"))
-	model, retryCmd := runUpdate(t, model, press("enter"))
-	if operations.selected != "SHA256:personal" || model.phase != phasePreparing || retryCmd == nil {
-		t.Fatalf("selection/retry = (%q, %v, %v)", operations.selected, model.phase, retryCmd)
+	model, _ = update(t, model, press("down"))
+	model, retry := update(t, model, press("enter"))
+	if ops.selected != "SHA256:personal" || model.phase != phasePreparing || retry == nil {
+		t.Fatalf("key selection/retry = %q/%v/%v", ops.selected, model.phase, retry)
 	}
 }
 
-func TestMissingAgentRunsSSHAddThenRetriesSpritePreparationOnce(t *testing.T) {
-	t.Parallel()
-	spriteRows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-	if err != nil {
-		t.Fatal(err)
+func TestSSHAddRecoveryRunsOnce(t *testing.T) {
+	base := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	base.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
+		return nil, sshagent.ErrNoKeys
 	}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return spriteRows, nil }}
-	spriteOps := &fakeSpriteOperations{
-		fakeOperations: base,
-		spritePrepareFn: func(context.Context, string, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
-			return nil, sshagent.ErrNoKeys
-		},
+	ops := &fakeSSHOperations{fakeSpriteOperations: base, addCommand: exec.Command("ssh-add")}
+	model := spriteReady(t, ops)
+	model, _ = update(t, model, press("enter"))
+	model, _ = update(t, model, press("down"))
+	model, prepare := update(t, model, press("enter"))
+	model, start := update(t, model, runFirst(t, prepare))
+	if model.phase != phaseStartingSSHAgent || start == nil || !model.sshRecoveryTried {
+		t.Fatalf("recovery start = phase %v cmd %v tried %v", model.phase, start, model.sshRecoveryTried)
 	}
-	operations := &fakeSSHKeyOperations{fakeSpriteOperations: spriteOps, command: exec.Command("ssh-add")}
-	model := New(context.Background(), operations)
-	model, _ = runUpdate(t, model, runCmd(t, model.Init()))
-
-	model, _ = runUpdate(t, model, press("enter"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, startAgentCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	if model.phase != phaseStartingSSHAgent || startAgentCmd == nil || !model.sshRecoveryAttempted {
-		t.Fatalf("agent recovery phase/cmd/attempted = (%v, %v, %v)", model.phase, startAgentCmd, model.sshRecoveryAttempted)
-	}
-
-	var sshAddArgs []string
 	model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
-		sshAddArgs = append([]string(nil), command.Args...)
+		if !reflect.DeepEqual(command.Args, []string{"ssh-add"}) {
+			t.Fatalf("ssh-add command args = %#v", command.Args)
+		}
 		return func() tea.Msg { return callback(nil) }
 	}
-	model, sshAddCmd := runUpdate(t, model, runCmd(t, startAgentCmd))
-	if model.phase != phaseAddingSSHKey || sshAddCmd == nil {
-		t.Fatalf("ssh-add handoff phase/cmd = (%v, %v)", model.phase, sshAddCmd)
+	model, add := update(t, model, run(t, start))
+	model, retry := update(t, model, run(t, add))
+	if retry == nil || model.phase != phasePreparing || ops.addCalls.Load() != 1 || base.prepareSpriteCalls.Load() != 1 {
+		t.Fatalf("ssh-add retry = phase %v add %d prepare %d cmd %v", model.phase, ops.addCalls.Load(), base.prepareSpriteCalls.Load(), retry)
 	}
-	if want := []string{"ssh-add"}; !reflect.DeepEqual(sshAddArgs, want) {
-		t.Fatalf("ssh-add args = %#v, want %#v", sshAddArgs, want)
-	}
-
-	model, retryPrepareCmd := runUpdate(t, model, runCmd(t, sshAddCmd))
-	if model.phase != phasePreparing || retryPrepareCmd == nil {
-		t.Fatalf("retry phase/cmd = (%v, %v)", model.phase, retryPrepareCmd)
-	}
-	model, refreshCmd := runUpdate(t, model, runCmd(t, retryPrepareCmd))
-	if model.phase != phaseRefreshing || refreshCmd == nil {
-		t.Fatalf("second key failure phase/cmd = (%v, %v), want one refresh", model.phase, refreshCmd)
-	}
-	if operations.addCalls.Load() != 1 || spriteOps.spritePrepareCalls.Load() != 2 {
-		t.Fatalf("ssh-add/prepare calls = (%d, %d), want (1, 2)", operations.addCalls.Load(), spriteOps.spritePrepareCalls.Load())
+	model, noSecondRecovery := update(t, model, runFirst(t, retry))
+	if noSecondRecovery != nil || model.phase != phaseReady || ops.addCalls.Load() != 1 || base.prepareSpriteCalls.Load() != 2 {
+		t.Fatalf("second failure = phase %v add %d prepare %d cmd %v", model.phase, ops.addCalls.Load(), base.prepareSpriteCalls.Load(), noSecondRecovery)
 	}
 }
 
-func TestSSHAddStartFailureRefreshesExistingSprite(t *testing.T) {
-	t.Parallel()
+func TestConfirmedAndRejectedCreateOutcomes(t *testing.T) {
+	t.Run("confirmed", func(t *testing.T) {
+		ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+		ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+			rows := spriteEndpointRows("devbox", sprites.Running)
+			if call > 1 {
+				rows = append(rows, spriteEndpointRows("newbox", sprites.Running)...)
+			}
+			return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: rows}}
+		}
+		model := ready(t, ops)
+		model, _ = update(t, model, press("n"))
+		model.nameInput.SetValue("newbox")
+		model, create := update(t, model, press("enter"))
+		model, refresh := update(t, model, runFirst(t, create))
+		model, _ = update(t, model, runFirst(t, refresh))
+		if selected(t, model).Label != "newbox" || model.createBlock != "" {
+			t.Fatalf("confirmed create selection/block = %q/%q", selected(t, model).Label, model.createBlock)
+		}
+	})
+	t.Run("rejected", func(t *testing.T) {
+		ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+		ops.createFn = func(_ context.Context, name string, _ int) sprites.CreateResult {
+			return sprites.CreateResult{Name: name, Rejected: true, Err: errors.New("name refused")}
+		}
+		model := ready(t, ops)
+		model, _ = update(t, model, press("n"))
+		model.nameInput.SetValue("newbox")
+		model, create := update(t, model, press("enter"))
+		model, _ = update(t, model, runFirst(t, create))
+		if model.phase != phaseNamingSprite || !model.nameInput.Focused() || !strings.Contains(model.View().Content, "name refused") || model.inventoryRefreshing {
+			t.Fatalf("rejected create = phase %v focused %v refreshing %v view %q", model.phase, model.nameInput.Focused(), model.inventoryRefreshing, model.View().Content)
+		}
+	})
+}
 
-	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: "devbox", State: sprites.Cold}})
-	if err != nil {
-		t.Fatal(err)
+func TestUnknownCreateOutcomeBlocksFurtherCreationUntilInventoryReconciles(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.createFn = func(_ context.Context, name string, _ int) sprites.CreateResult {
+		return sprites.CreateResult{Name: name, Err: errors.New("timeout")}
 	}
-	base := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) { return rows, nil }}
-	spriteOps := &fakeSpriteOperations{
-		fakeOperations: base,
-		spritePrepareFn: func(context.Context, string, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
-			return nil, sshagent.ErrNoKeys
-		},
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		result := catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Running)}}
+		if call == 2 {
+			result.Sprites.Err = errors.New("cannot reconcile")
+			result.Sprites.Rows = nil
+		}
+		if call >= 3 {
+			result.Sprites.Rows = append(result.Sprites.Rows, spriteEndpointRows("newbox", sprites.Running)...)
+		}
+		return result
 	}
-	operations := &fakeSSHKeyOperations{fakeSpriteOperations: spriteOps, err: errors.New("agent start failed")}
-	model := readySpriteModel(t, operations)
-	model, _ = runUpdate(t, model, press("enter"))
-	model, _ = runUpdate(t, model, press("down"))
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, startAgentCmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	model, refreshCmd := runUpdate(t, model, runCmd(t, startAgentCmd))
-	if refreshCmd == nil || model.phase != phaseRefreshing || base.listCalls.Load() != 1 {
-		t.Fatalf("failure phase/list/cmd = (%v, %d, %v), want refreshing/1/non-nil", model.phase, base.listCalls.Load(), refreshCmd)
+	model := ready(t, ops)
+	model, _ = update(t, model, press("n"))
+	model.nameInput.SetValue("newbox")
+	model, create := update(t, model, press("enter"))
+	model, refresh := update(t, model, runFirst(t, create))
+	if model.createBlock != "newbox" || model.phase != phaseReady || !model.inventoryRefreshing || refresh == nil {
+		t.Fatalf("unknown outcome block/phase/refreshing/cmd = %q/%v/%v/%v", model.createBlock, model.phase, model.inventoryRefreshing, refresh)
 	}
-	if !strings.Contains(model.attachNotice, "agent start failed") {
-		t.Fatalf("failure notice = %q", model.attachNotice)
+	model, _ = update(t, model, runFirst(t, refresh))
+	if !strings.Contains(model.View().Content, "outcome is unknown") || !strings.Contains(model.View().Content, "cannot reconcile") {
+		t.Fatalf("unknown notice did not survive failed reconciliation: %q", model.View().Content)
+	}
+	model, cmd := update(t, model, press("n"))
+	if cmd != nil || model.phase != phaseReady || ops.createCalls.Load() != 1 {
+		t.Fatal("unknown creation outcome allowed another create")
+	}
+	model, refresh = update(t, model, press("r"))
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.createBlock != "" || model.createNotice != "" {
+		t.Fatalf("confirmed reconciliation did not clear create block/notice: %q/%q", model.createBlock, model.createNotice)
 	}
 }
 
-func TestPrepareFailureReturnsToReadyWithoutExec(t *testing.T) {
-	t.Parallel()
-
-	operations := &fakeOperations{prepareFn: func(context.Context, catalog.Destination, int) (catalog.PreparedAttach, error) {
-		return nil, errors.New("cannot prepare")
-	}}
-	model := readyModel(t, operations)
-	execCalls := 0
-	model.execProcess = func(*exec.Cmd, tea.ExecCallback) tea.Cmd {
-		execCalls++
-		return nil
-	}
-	model, prepareCmd := runUpdate(t, model, press("enter"))
-	model, cmd := runUpdate(t, model, runCmd(t, prepareCmd))
-	if cmd != nil || execCalls != 0 || model.phase != phaseReady || !model.attachEnabled {
-		t.Fatalf("prepare failure cmd/exec/phase/enabled = (%v, %d, %v, %v)", cmd, execCalls, model.phase, model.attachEnabled)
-	}
-	if !strings.Contains(model.View().Content, "Couldn’t prepare destination: cannot prepare") {
-		t.Fatalf("prepare failure view = %q", model.View().Content)
-	}
-}
-
-func TestRenderedSourceTextCannotReorderTerminalContent(t *testing.T) {
-	t.Parallel()
-
-	destinations := testDestinations()
-	destinations[0].Label = "safe\u202eevil\u2066"
-	operations := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) {
-		return destinations, nil
-	}}
-	model := readyModel(t, operations)
-	content := model.View().Content
-	if strings.ContainsAny(content, "\u202e\u2066") {
-		t.Fatalf("view retained bidi formatting: %q", content)
-	}
-	if !strings.Contains(content, "safeevil") {
-		t.Fatalf("view lost printable label text: %q", content)
-	}
-}
-
-func TestLoadingEmptyFailureAndNarrowViewsStayReadable(t *testing.T) {
-	t.Parallel()
-
-	loading := New(context.Background(), &fakeOperations{})
-	loading, _ = runUpdate(t, loading, tea.WindowSizeMsg{Width: 8, Height: 3})
-	assertReadableView(t, loading, "Loadin")
-	assertViewFits(t, loading.View(), 8, 3)
-
-	emptyOps := &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) {
-		return []catalog.Destination{}, nil
-	}}
-	empty := readyModel(t, emptyOps)
-	empty, _ = runUpdate(t, empty, tea.WindowSizeMsg{Width: 8, Height: 3})
-	assertReadableView(t, empty, "No des")
-	assertViewFits(t, empty.View(), 8, 3)
-	if _, cmd := runUpdate(t, empty, press("enter")); cmd != nil {
-		t.Fatal("empty ready view allowed attach")
-	}
-
-	failure := New(context.Background(), &fakeOperations{listFn: func(context.Context, int) ([]catalog.Destination, error) {
-		return nil, errors.New("failed")
-	}})
-	failure, _ = runUpdate(t, failure, runCmd(t, failure.Init()))
-	failure, _ = runUpdate(t, failure, tea.WindowSizeMsg{Width: 8, Height: 3})
-	assertReadableView(t, failure, "Couldn")
-	assertViewFits(t, failure.View(), 8, 3)
-}
-
-func assertBlockedListCanceled(t *testing.T, quitKey string) {
-	t.Helper()
+func TestQuitCancelsEffectAndRejectsLatePreparedCompletion(t *testing.T) {
 	started := make(chan struct{})
-	operations := &fakeOperations{listFn: func(ctx context.Context, _ int) ([]catalog.Destination, error) {
+	ops := &fakeOperations{prepareFn: func(ctx context.Context, destination catalog.Destination, _ int) (catalog.PreparedAttach, error) {
 		close(started)
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return catalog.Prepare(destination)
 	}}
+	model := ready(t, ops)
+	model, prepare := update(t, model, press("enter"))
+	done := make(chan tea.Msg, 1)
+	go func() { done <- runFirst(t, prepare) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prepare did not start")
+	}
+	model, quit := update(t, model, press("q"))
+	if !model.quitting || quit == nil {
+		t.Fatal("quit did not cancel preparation")
+	}
+	select {
+	case completion := <-done:
+		model, late := update(t, model, completion)
+		if late != nil || !model.quitting || model.prepared != nil {
+			t.Fatal("late prepared completion survived quit cleanup")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled preparation did not return")
+	}
+}
+
+func TestTerminalBoundsAndControlCharacterSanitization(t *testing.T) {
+	ops := &fakeOperations{inventoryFn: func(context.Context, int) catalog.Inventory {
+		rows := localRows()
+		rows[0].Label = "safe\x1b[31m\u202eevil\nnext"
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: rows}, Sprites: catalog.SourceResult{Skipped: true}}
+	}}
+	model := ready(t, ops)
+	for _, size := range []tea.WindowSizeMsg{{Width: 40, Height: 12}, {Width: 80, Height: 24}} {
+		model, _ = update(t, model, size)
+		view := model.View()
+		assertFits(t, view, size.Width, size.Height)
+		if !strings.Contains(view.Content, "╭") || !strings.Contains(view.Content, "╰") {
+			t.Fatalf("border was clipped at %dx%d: %q", size.Width, size.Height, view.Content)
+		}
+		if strings.Contains(view.Content, "\u202e") || strings.Contains(view.Content, "evil\nnext") || !strings.Contains(view.Content, "safe[31mevilnext") {
+			t.Fatalf("source text was not sanitized at %dx%d: %q", size.Width, size.Height, view.Content)
+		}
+	}
+}
+
+func TestSpriteNamingUsesTextInputAndQIsText(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := ready(t, ops)
+	model, _ = update(t, model, press("n"))
+	model, _ = update(t, model, press("q"))
+	if model.quitting || model.nameInput.Value() != "q" {
+		t.Fatalf("name input q = value %q quitting %v", model.nameInput.Value(), model.quitting)
+	}
+}
+
+func ready(t *testing.T, operations Operations) Model {
+	t.Helper()
 	model := New(context.Background(), operations)
-	done := runCmdAsync(model.Init())
-	awaitSignal(t, started, "list start")
-	quitting, quitCmd := runUpdate(t, model, press(quitKey))
-	assertQuitCmd(t, quitCmd)
-	completion := awaitMessage(t, done, "canceled list").(listDone)
-	if !errors.Is(completion.err, context.Canceled) {
-		t.Fatalf("list error = %v, want context.Canceled", completion.err)
-	}
-	quitting, staleCmd := runUpdate(t, quitting, completion)
-	if staleCmd != nil || !quitting.quitting || quitting.phase != phaseLoading {
-		t.Fatal("completion arriving after list cancellation changed the model")
-	}
-}
-
-func mustSpriteDestinations(t *testing.T, records ...sprites.Sprite) []catalog.Destination {
-	t.Helper()
-	destinations, err := catalog.SpriteDestinations(records)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return destinations
-}
-
-func testDestinations() []catalog.Destination {
-	destinations, err := catalog.LocalDestinations([]herdr.Session{
-		{Name: "default", Default: true, Running: true},
-		{Name: "alpha", Running: false},
-	})
-	if err != nil {
-		panic(err)
-	}
-	return destinations
-}
-
-func readyModel(t *testing.T, operations *fakeOperations) Model {
-	t.Helper()
-	return readyOperationsModel(t, operations)
-}
-
-func readySpriteModel(t *testing.T, operations Operations) Model {
-	t.Helper()
-	return readyOperationsModel(t, operations)
-}
-
-func readyOperationsModel(t *testing.T, operations Operations) Model {
-	t.Helper()
-	model := New(context.Background(), operations)
-	model, _ = runUpdate(t, model, runCmd(t, model.Init()))
+	model, _ = update(t, model, run(t, model.initialCmd))
 	if model.phase != phaseReady {
-		t.Fatalf("initial phase = %v, want ready", model.phase)
+		t.Fatalf("initial load phase = %v, notice %q", model.phase, model.notice)
 	}
 	return model
 }
 
-func press(name string) tea.KeyPressMsg {
-	key := tea.Key{Text: name}
-	switch name {
-	case "enter":
-		key = tea.Key{Code: tea.KeyEnter}
-	case "up":
-		key = tea.Key{Code: tea.KeyUp}
-	case "down":
-		key = tea.Key{Code: tea.KeyDown}
-	case "ctrl+c":
-		key = tea.Key{Code: 'c', Mod: tea.ModCtrl}
-	case "esc":
-		key = tea.Key{Code: tea.KeyEscape}
-	case "backspace":
-		key = tea.Key{Code: tea.KeyBackspace}
-	default:
-		runes := []rune(name)
-		if len(runes) == 1 {
-			key.Code = runes[0]
-		}
+func spriteReady(t *testing.T, operations Operations) Model {
+	t.Helper()
+	model := ready(t, operations)
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	model, _ = update(t, model, runFirst(t, load))
+	if model.screen != screenSprite || model.phase != phaseReady {
+		t.Fatalf("Sprite detail phase/screen = %v/%v", model.phase, model.screen)
 	}
-	return tea.KeyPressMsg(key)
+	return model
 }
 
-func runUpdate(t *testing.T, model Model, msg tea.Msg) (Model, tea.Cmd) {
+func localRows() []catalog.Destination {
+	rows, err := catalog.LocalDestinations([]herdr.Session{{Name: "default", Default: true, Running: true}, {Name: "alpha"}})
+	if err != nil {
+		panic(err)
+	}
+	return rows
+}
+
+func spriteEndpointRows(name string, state sprites.State) []catalog.Destination {
+	rows, err := catalog.SpriteDestinations([]sprites.Sprite{{Name: name, State: state}})
+	if err != nil {
+		panic(err)
+	}
+	return rows
+}
+
+func spriteSessionRows(name string, state sprites.State) []catalog.Destination {
+	endpoint := spriteEndpointRows(name, state)[0]
+	selection, err := catalog.SelectSpriteEndpoint(endpoint)
+	if err != nil {
+		panic(err)
+	}
+	rows, err := catalog.SpriteSessionDestinations(selection, []herdr.Session{{Name: "default", Default: true, Running: true}, {Name: "work"}})
+	if err != nil {
+		panic(err)
+	}
+	return rows
+}
+
+func spriteSessionSelection(name, session string) catalog.SpriteSessionSelection {
+	for _, row := range spriteSessionRows(name, sprites.Running) {
+		if row.Session == session {
+			selection, err := catalog.SelectSpriteSession(row)
+			if err != nil {
+				panic(err)
+			}
+			return selection
+		}
+	}
+	panic("missing Sprite session")
+}
+
+func selected(t *testing.T, model Model) catalog.Destination {
+	t.Helper()
+	destination, ok := model.selectedDestination()
+	if !ok {
+		t.Fatal("no selected destination")
+	}
+	return destination
+}
+
+func update(t *testing.T, model Model, msg tea.Msg) (Model, tea.Cmd) {
 	t.Helper()
 	updated, cmd := model.Update(msg)
 	result, ok := updated.(Model)
 	if !ok {
-		t.Fatalf("Update model = %T, want ui.Model", updated)
+		t.Fatalf("Update returned %T", updated)
 	}
 	return result, cmd
 }
 
-func runCmd(t *testing.T, cmd tea.Cmd) tea.Msg {
+func run(t *testing.T, cmd tea.Cmd) tea.Msg {
 	t.Helper()
 	if cmd == nil {
 		t.Fatal("cannot run nil command")
@@ -1428,59 +1030,66 @@ func runCmd(t *testing.T, cmd tea.Cmd) tea.Msg {
 	return cmd()
 }
 
-func runCmdAsync(cmd tea.Cmd) <-chan tea.Msg {
-	done := make(chan tea.Msg, 1)
-	go func() { done <- cmd() }()
-	return done
-}
-
-func awaitSignal(t *testing.T, signal <-chan struct{}, name string) {
+func runFirst(t *testing.T, cmd tea.Cmd) tea.Msg {
 	t.Helper()
-	select {
-	case <-signal:
-	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for %s", name)
+	msg := run(t, cmd)
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		if len(batch) == 0 {
+			t.Fatal("empty command batch")
+		}
+		return run(t, batch[0])
 	}
+	return msg
 }
 
-func awaitMessage(t *testing.T, messages <-chan tea.Msg, name string) tea.Msg {
-	t.Helper()
-	select {
-	case message := <-messages:
-		return message
-	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for %s", name)
-		return nil
+func press(name string) tea.KeyPressMsg {
+	keyValue := tea.Key{Text: name}
+	switch name {
+	case "enter":
+		keyValue = tea.Key{Code: tea.KeyEnter}
+	case "up":
+		keyValue = tea.Key{Code: tea.KeyUp}
+	case "down":
+		keyValue = tea.Key{Code: tea.KeyDown}
+	case "esc":
+		keyValue = tea.Key{Code: tea.KeyEscape}
+	case "ctrl+c":
+		keyValue = tea.Key{Code: 'c', Mod: tea.ModCtrl}
+	default:
+		runes := []rune(name)
+		if len(runes) == 1 {
+			keyValue.Code = runes[0]
+		}
 	}
+	return tea.KeyPressMsg(keyValue)
 }
 
-func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
-	t.Helper()
-	if cmd == nil {
-		t.Fatal("quit returned nil command")
+func contains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
 	}
-	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatalf("quit command message = %T, want tea.QuitMsg", cmd())
+	return false
+}
+func containsPrefix(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.HasPrefix(value, wanted) {
+			return true
+		}
 	}
+	return false
 }
 
-func assertReadableView(t *testing.T, model Model, want string) {
-	t.Helper()
-	view := model.View()
-	if view.Content == "" || !strings.Contains(view.Content, "hrd") || !strings.Contains(view.Content, want) {
-		t.Fatalf("view content = %q, want hrd and %q", view.Content, want)
-	}
-}
-
-func assertViewFits(t *testing.T, view tea.View, width, height int) {
+func assertFits(t *testing.T, view tea.View, width, height int) {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(view.Content, "\n"), "\n")
 	if len(lines) > height {
-		t.Fatalf("view has %d lines, want at most %d: %q", len(lines), height, view.Content)
+		t.Fatalf("view height = %d, want <= %d: %q", len(lines), height, view.Content)
 	}
 	for index, line := range lines {
 		if got := lipgloss.Width(line); got > width {
-			t.Fatalf("view line %d has width %d, want at most %d: %q", index, got, width, line)
+			t.Fatalf("line %d width = %d, want <= %d: %q", index, got, width, line)
 		}
 	}
 }
