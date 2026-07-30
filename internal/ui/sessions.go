@@ -28,10 +28,6 @@ func (s *sessionsState) invalidate() {
 	s.spriteSnapshotDetail.current = false
 }
 
-type sessionsMessage interface {
-	sessionsMessage()
-}
-
 type spriteSessionsDone struct {
 	opID       uint64
 	endpointID catalog.DestinationID
@@ -39,24 +35,9 @@ type spriteSessionsDone struct {
 	err        error
 }
 
-func (spriteSessionsDone) sessionsMessage() {}
-
 type installSpriteHerdrDone struct {
 	opID uint64
 	err  error
-}
-
-func (installSpriteHerdrDone) sessionsMessage() {}
-
-func (m Model) updateSessionsMessage(msg sessionsMessage) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case spriteSessionsDone:
-		return m.updateSpriteSessionsDone(msg)
-	case installSpriteHerdrDone:
-		return m.updateInstallSpriteHerdrDone(msg)
-	default:
-		panic("ui: invalid Sprite Sessions message")
-	}
 }
 
 func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -83,6 +64,7 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if key.Matches(msg, m.keys.stop) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
+				m.connection.sprite = true
 				m.connection.destination = destination
 				m.connection.restart = false
 				m.showConnection(connectionConfirmingStop)
@@ -91,6 +73,7 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if key.Matches(msg, m.keys.restart) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
+				m.connection.sprite = true
 				m.connection.destination = destination
 				m.connection.restart = true
 				m.showConnection(connectionConfirmingStop)
@@ -104,6 +87,7 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.notice = ""
 			m.selectedID = destination.ID
+			m.connection.sprite = true
 			m.connection.destination = destination
 			m.connection.restart = false
 			m.connection.transport = catalog.NativePreview

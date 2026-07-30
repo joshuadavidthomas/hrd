@@ -11,32 +11,21 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 )
 
-type connectionMessage interface {
-	connectionMessage()
-}
-
 type prepareDone struct {
 	opID     uint64
 	prepared catalog.PreparedAttach
 	err      error
 }
 
-func (prepareDone) connectionMessage()   {}
-func (m prepareDone) closeLateResource() { closePrepared(m.prepared) }
-
 type stopDone struct {
 	opID uint64
 	err  error
 }
 
-func (stopDone) connectionMessage() {}
-
 type attachDone struct {
 	opID uint64
 	err  error
 }
-
-func (attachDone) connectionMessage() {}
 
 type sshAddReady struct {
 	opID    uint64
@@ -44,23 +33,19 @@ type sshAddReady struct {
 	err     error
 }
 
-func (sshAddReady) connectionMessage() {}
-
 type sshAddDone struct {
 	opID uint64
 	err  error
 }
 
-func (sshAddDone) connectionMessage() {}
-
 type prepareOperation struct {
 	destination catalog.Destination
 	transport   catalog.SpriteTransport
-	sprite      bool
 }
 
 type connectionState struct {
 	phase            connectionPhase
+	sprite           bool
 	destination      catalog.Destination
 	prepare          prepareOperation
 	prepared         catalog.PreparedAttach
@@ -71,24 +56,6 @@ type connectionState struct {
 	sshKeySource     string
 	sshKeyChoices    []catalog.SSHIdentity
 	sshKeyCursor     int
-}
-
-// Model is hrd's Bubble Tea model.
-func (m Model) updateConnectionMessage(msg connectionMessage) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case prepareDone:
-		return m.updatePrepareDone(msg)
-	case stopDone:
-		return m.updateStopDone(msg)
-	case attachDone:
-		return m.updateAttachDone(msg)
-	case sshAddReady:
-		return m.updateSSHAddReady(msg)
-	case sshAddDone:
-		return m.updateSSHAddDone(msg)
-	default:
-		panic("ui: invalid Connection message")
-	}
 }
 
 func (m Model) updateConnectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -167,7 +134,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 	m.cancelOperation()
 	if msg.err != nil {
 		closePrepared(msg.prepared)
-		if !m.connection.restartStopped && m.connection.prepare.sprite && m.connection.prepare.transport == catalog.SSHFallback {
+		if !m.connection.restartStopped && m.connection.sprite && m.connection.prepare.transport == catalog.SSHFallback {
 			if source, choices, ok := catalog.SSHKeyChoices(msg.err); ok {
 				m.showConnection(connectionChoosingSSHKey)
 				m.connection.sshKeySource = printable(source)
@@ -248,7 +215,7 @@ func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
 	} else {
 		m.notice = ""
 	}
-	if m.connection.prepare.sprite {
+	if m.connection.sprite {
 		m.connection.restartStopped = false
 		cmd := m.beginSpriteRefresh()
 		return m, cmd
@@ -336,6 +303,7 @@ func (m *Model) beginStop(destination catalog.Destination) tea.Cmd {
 func (m *Model) beginPrepareLocal(destination catalog.Destination) tea.Cmd {
 	opID, ctx := m.beginOperation()
 	m.showConnection(connectionPreparing)
+	m.connection.sprite = false
 	m.connection.prepare = prepareOperation{destination: destination}
 	operations := m.operations
 	return func() tea.Msg {
@@ -362,7 +330,8 @@ func (m *Model) startPrepareSprite(destination catalog.Destination, transport ca
 	}
 	opID, ctx := m.beginOperation()
 	m.showConnection(connectionPreparing)
-	m.connection.prepare = prepareOperation{destination: destination, transport: transport, sprite: true}
+	m.connection.sprite = true
+	m.connection.prepare = prepareOperation{destination: destination, transport: transport}
 	return func() tea.Msg {
 		prepared, err := operations.PrepareSprite(ctx, selection, transport)
 		return prepareDone{opID: opID, prepared: prepared, err: err}
@@ -418,7 +387,7 @@ func (m *Model) beginNativeAttach(prepared catalog.PreparedNativeAttach) tea.Cmd
 }
 
 func (m *Model) invalidateSpriteAttachObservations() {
-	if !m.connection.prepare.sprite {
+	if !m.connection.sprite {
 		return
 	}
 	m.home.invalidateSprites()

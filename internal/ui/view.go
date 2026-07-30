@@ -197,7 +197,7 @@ func (m Model) connectionView(width, height int) string {
 	case connectionChoosingTransport:
 		return fitView(m.transportView(width), width, height)
 	case connectionPreparing:
-		if m.connection.prepare.sprite {
+		if m.connection.sprite {
 			if m.connection.prepare.transport == catalog.SSHFallback {
 				return m.busyLine("Setting up SSH on "+m.spriteName()+"… Up to three minutes.", width)
 			}
@@ -219,7 +219,7 @@ func (m Model) connectionView(width, height int) string {
 	case connectionChoosingSSHKey:
 		return fitView(m.sshKeyView(width), width, height)
 	case connectionAttaching:
-		if m.connection.prepare.sprite && m.connection.prepare.transport == catalog.NativePreview {
+		if m.connection.sprite && m.connection.prepare.transport == catalog.NativePreview {
 			return m.listView(width, height)
 		}
 		return "Herdr has the terminal."

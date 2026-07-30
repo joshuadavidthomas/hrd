@@ -222,22 +222,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) showsSprite() bool {
-	switch m.active {
-	case workflowHome:
-		return false
-	case workflowSessions:
-		return true
-	case workflowConnection:
-		switch m.connection.phase {
-		case connectionConfirmingStop, connectionStopping, connectionChoosingTransport:
-			_, ok := m.connection.destination.Endpoint.(catalog.SpriteEndpoint)
-			return ok
-		default:
-			return m.connection.prepare.sprite
-		}
-	default:
-		panic("ui: invalid active workflow")
-	}
+	return m.active == workflowSessions || (m.active == workflowConnection && m.connection.sprite)
 }
 
 func (m *Model) showHome(next homePhase) {
@@ -276,14 +261,10 @@ func (m Model) ready() bool {
 	}
 }
 
-type lateResourceMessage interface {
-	closeLateResource()
-}
-
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitting {
-		if late, ok := msg.(lateResourceMessage); ok {
-			late.closeLateResource()
+		if done, ok := msg.(prepareDone); ok {
+			closePrepared(done.prepared)
 		}
 		return m, nil
 	}
@@ -308,12 +289,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, scheduleRefresh())
 		return m, tea.Batch(cmds...)
-	case homeMessage:
-		return m.updateHomeMessage(msg)
-	case sessionsMessage:
-		return m.updateSessionsMessage(msg)
-	case connectionMessage:
-		return m.updateConnectionMessage(msg)
+	case inventoryDone:
+		return m.updateInventoryDone(msg)
+	case createDone:
+		return m.updateCreateDone(msg)
+	case spriteSessionsDone:
+		return m.updateSpriteSessionsDone(msg)
+	case installSpriteHerdrDone:
+		return m.updateInstallSpriteHerdrDone(msg)
+	case prepareDone:
+		return m.updatePrepareDone(msg)
+	case stopDone:
+		return m.updateStopDone(msg)
+	case attachDone:
+		return m.updateAttachDone(msg)
+	case sshAddReady:
+		return m.updateSSHAddReady(msg)
+	case sshAddDone:
+		return m.updateSSHAddDone(msg)
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	default:
