@@ -152,7 +152,6 @@ type keyMap struct {
 	quit    key.Binding
 	force   key.Binding
 	confirm key.Binding
-	cancel  key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -167,7 +166,6 @@ func newKeyMap() keyMap {
 		quit:    key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		force:   key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 		confirm: key.NewBinding(key.WithKeys("y", "enter"), key.WithHelp("y", "confirm")),
-		cancel:  key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n", "cancel")),
 	}
 }
 
@@ -1365,17 +1363,7 @@ func (m Model) View() tea.View {
 	surfaceWidth := m.surfaceWidth()
 	m.help.SetWidth(surfaceWidth)
 
-	contextName := "Sessions & Sprites"
-	if m.screen == screenSprite {
-		contextName = "Sprite"
-		if endpoint, ok := m.spriteEndpoint.Endpoint.(catalog.SpriteEndpoint); ok {
-			contextName = printable(endpoint.Name)
-		}
-		if m.phase == phaseChoosingSpriteTransport && m.confirmDest.Label != "" {
-			contextName += " / " + printable(m.confirmDest.Label)
-		}
-	}
-	lines := []string{titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ "+contextName)}
+	lines := []string{m.breadcrumbView()}
 
 	footer := m.helpView()
 	footerHeight := lipgloss.Height(footer)
@@ -1402,6 +1390,68 @@ func (m Model) View() tea.View {
 	view.AltScreen = true
 	view.WindowTitle = "hrd · Herdr sessions"
 	return view
+}
+
+func (m Model) breadcrumbView() string {
+	prefix := titleStyle.Render("hrd") + "  "
+	segments := m.breadcrumbSegments()
+	available := max(1, m.surfaceWidth()-lipgloss.Width(prefix))
+	context := "/ " + strings.Join(segments, " / ")
+	for lipgloss.Width(context) > available && len(segments) > 1 {
+		if segments[0] != "…" {
+			segments = append([]string{"…"}, segments[1:]...)
+		} else if len(segments) > 2 {
+			segments = append(segments[:1], segments[2:]...)
+		} else {
+			segments = segments[1:]
+		}
+		context = "/ " + strings.Join(segments, " / ")
+	}
+	return prefix + mutedStyle.Render(clip(context, available))
+}
+
+func (m Model) breadcrumbSegments() []string {
+	segments := []string{"Inventory"}
+	if m.screen == screenSprite {
+		segments = append(segments, m.spriteName())
+	}
+	if m.phase == phaseReady && m.browser.SettingFilter() {
+		return append(segments, "Filter")
+	}
+
+	switch m.phase {
+	case phaseNamingSprite, phaseCreatingSprite:
+		return append(segments, "New Sprite")
+	case phaseConfirmingSpriteInstall, phaseInstallingSpriteHerdr:
+		return append(segments, "Install Herdr")
+	case phaseConfirmingStop, phaseStopping:
+		if m.confirmDest.Label != "" {
+			segments = append(segments, printable(m.confirmDest.Label))
+		}
+		action := "Stop"
+		if m.restart {
+			action = "Restart"
+		}
+		return append(segments, action)
+	case phaseChoosingSpriteTransport:
+		if m.confirmDest.Label != "" {
+			segments = append(segments, printable(m.confirmDest.Label))
+		}
+		if m.restart {
+			segments = append(segments, "Restart")
+		}
+		return append(segments, "Connect")
+	case phasePreparing, phaseConfirmingHostKey, phaseStartingSSHAgent, phaseAddingSSHKey, phaseChoosingSSHKey, phaseAttaching:
+		if m.activePrepare.destination.Label != "" {
+			segments = append(segments, printable(m.activePrepare.destination.Label))
+		}
+		if m.restartStopSucceeded {
+			segments = append(segments, "Restart")
+		}
+		return append(segments, "Connect")
+	default:
+		return segments
+	}
 }
 
 func (m Model) bodyView(width, height int) string {
@@ -1823,10 +1873,15 @@ func (m Model) helpView() string {
 	var full [][]key.Binding
 	movement := key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move"))
 	filtering := key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter"))
-	escapeCancel := key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel"))
+	escapeTo := func(destination string) key.Binding {
+		return key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", destination))
+	}
+	cancelTo := func(destination string) key.Binding {
+		return key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", destination))
+	}
 	switch m.phase {
 	case phaseNamingSprite:
-		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), m.keys.back, m.keys.force}
+		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("inventory"), m.keys.force}
 	case phaseChoosingSpriteTransport:
 		short = []key.Binding{
 			key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")),
@@ -1837,18 +1892,18 @@ func (m Model) helpView() string {
 	case phasePreparing:
 		short = []key.Binding{m.keys.quit}
 	case phaseConfirmingSpriteInstall:
-		short = []key.Binding{m.keys.confirm, m.keys.cancel, m.keys.quit}
+		short = []key.Binding{m.keys.confirm, cancelTo("inventory"), m.keys.quit}
 	case phaseConfirmingStop:
-		short = []key.Binding{m.keys.confirm, m.keys.cancel, m.keys.quit}
+		short = []key.Binding{m.keys.confirm, cancelTo("sessions"), m.keys.quit}
 	case phaseConfirmingHostKey:
-		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "continue")), m.keys.back, m.keys.quit}
+		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "continue")), cancelTo("sessions"), m.keys.quit}
 	case phaseChoosingSSHKey:
-		short = []key.Binding{key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")), key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "use key")), m.keys.back, m.keys.quit}
+		short = []key.Binding{key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")), key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "use key")), escapeTo("sessions"), m.keys.quit}
 	case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
-		short = []key.Binding{escapeCancel, m.keys.force}
+		short = []key.Binding{escapeTo("inventory"), m.keys.force}
 	case phaseReady:
 		if m.browser.SettingFilter() {
-			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), m.keys.back, m.keys.force}
+			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
 		} else if m.screen == screenSprite {
 			actions := make([]key.Binding, 0, 3)
 			if _, ok := m.selectedDestination(); ok && m.selectedCurrent() {
@@ -1857,8 +1912,9 @@ func (m Model) helpView() string {
 			if _, ok := m.selectedSpriteSessionForMutation(); ok {
 				actions = append(actions, m.keys.stop, m.keys.restart)
 			}
-			navigation := []key.Binding{movement, filtering, m.keys.refresh, m.keys.back, m.keys.quit, m.keys.help}
-			short = append([]key.Binding{movement}, actions...)
+			navigation := []key.Binding{movement, escapeTo("inventory"), filtering, m.keys.refresh, m.keys.quit, m.keys.help}
+			short = []key.Binding{movement, escapeTo("inventory")}
+			short = append(short, actions...)
 			short = append(short, filtering, m.keys.refresh, m.keys.help)
 			full = [][]key.Binding{actions, navigation}
 		} else {
