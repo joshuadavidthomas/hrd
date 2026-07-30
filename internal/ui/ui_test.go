@@ -201,6 +201,42 @@ func TestWideReadyViewUsesCenteredContentHeightSections(t *testing.T) {
 	}
 }
 
+func TestRefreshToastDoesNotMoveCenteredContent(t *testing.T) {
+	model := ready(t, &fakeOperations{})
+	model, _ = update(t, model, tea.WindowSizeMsg{Width: 120, Height: 40})
+	position := func(content, text string) (int, int) {
+		for row, line := range strings.Split(ansi.Strip(content), "\n") {
+			if column := strings.Index(line, text); column >= 0 {
+				return row, column
+			}
+		}
+		return -1, -1
+	}
+	baseRow, baseColumn := position(model.View().Content, "hrd  / Sessions & Sprites")
+	model.inventoryRefreshing = true
+	refreshing := model.View().Content
+	toastRow, toastColumn := position(refreshing, "hrd  / Sessions & Sprites")
+	if baseRow != toastRow || baseColumn != toastColumn {
+		t.Fatalf("refresh moved title from %d,%d to %d,%d", baseRow, baseColumn, toastRow, toastColumn)
+	}
+	if !strings.Contains(ansi.Strip(refreshing), "Refreshing local and Sprite inventory") {
+		t.Fatalf("refresh toast missing: %q", refreshing)
+	}
+}
+
+func TestShortToastKeepsFailureAheadOfRefreshProgress(t *testing.T) {
+	for height := 1; height <= 4; height++ {
+		model := ready(t, &fakeOperations{})
+		model, _ = update(t, model, tea.WindowSizeMsg{Width: 80, Height: height})
+		model.phase = phaseRefreshingSprite
+		model.notice = "Attach failed: socket closed"
+		plain := ansi.Strip(model.View().Content)
+		if !strings.Contains(plain, "Attach failed") {
+			t.Errorf("height %d hid failure toast: %q", height, plain)
+		}
+	}
+}
+
 func TestPartialSourceFailureRetainsStaleRowsAndDisablesTheirActions(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
@@ -375,10 +411,11 @@ func TestNavigationBetweenEndpointAndSpriteScreensResetsFilter(t *testing.T) {
 	}
 	model, _ = update(t, model, runFirst(t, load))
 	model.browser.SetFilterText("work")
-	model, _ = update(t, model, press("esc"))
-	if model.screen != screenEndpoints || model.browser.FilterValue() != "" || model.browser.SettingFilter() {
-		t.Fatalf("Sprite filter survived back navigation = screen %v setting %v query %q", model.screen, model.browser.SettingFilter(), model.browser.FilterValue())
+	model, reconcile := update(t, model, press("esc"))
+	if model.screen != screenEndpoints || model.browser.FilterValue() != "" || model.browser.SettingFilter() || reconcile == nil {
+		t.Fatalf("Sprite filter survived back navigation = screen %v setting %v query %q cmd %v", model.screen, model.browser.SettingFilter(), model.browser.FilterValue(), reconcile)
 	}
+	model, _ = update(t, model, runFirst(t, reconcile))
 }
 
 func TestSpriteRefreshPreservesAppliedFilter(t *testing.T) {
@@ -441,9 +478,10 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 		}
 	}
 	model, cmd := update(t, model, press("n"))
-	if cmd != nil || model.screen != screenEndpoints || model.phase != phaseReady || ops.installCalls.Load() != 0 {
+	if cmd == nil || model.screen != screenEndpoints || model.phase != phaseReady || ops.installCalls.Load() != 0 {
 		t.Fatalf("install rejection = screen %v phase %v calls %d cmd %v", model.screen, model.phase, ops.installCalls.Load(), cmd)
 	}
+	model, _ = update(t, model, runFirst(t, cmd))
 
 	model.browser.Select(2)
 	model, load = update(t, model, press("enter"))
@@ -488,7 +526,8 @@ func TestSpriteDetailSnapshotIsResetAcrossEndpoints(t *testing.T) {
 	if len(model.browser.Items()) != 2 {
 		t.Fatalf("alpha detail items = %d", len(model.browser.Items()))
 	}
-	model, _ = update(t, model, press("esc"))
+	model, reconcile := update(t, model, press("esc"))
+	model, _ = update(t, model, runFirst(t, reconcile))
 	model.browser.Select(3)
 	model, load = update(t, model, press("enter"))
 	if len(model.browser.Items()) != 0 || model.spriteSnapshotDetail.loaded {
@@ -568,9 +607,18 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 			if model.phase != phasePreparing || prepare == nil {
 				t.Fatalf("prepare phase/cmd = %v/%v", model.phase, prepare)
 			}
+			if tc.transport == catalog.NativePreview {
+				view := ansi.Strip(model.View().Content)
+				if !strings.Contains(view, "Choose a connection") || strings.Contains(view, "Waking") || strings.Contains(view, "Herdr has the terminal") {
+					t.Fatalf("native preparation flashed an intermediate screen: %q", view)
+				}
+			}
 			model, handoff := update(t, model, runFirst(t, prepare))
 			if model.phase != phaseAttaching || handoff == nil {
 				t.Fatalf("handoff phase/cmd = %v/%v", model.phase, handoff)
+			}
+			if model.spriteSnapshot.current || model.spriteSnapshotDetail.current {
+				t.Fatalf("attach retained current observations = endpoint %v sessions %v", model.spriteSnapshot.current, model.spriteSnapshotDetail.current)
 			}
 			if tc.transport == catalog.NativePreview {
 				if native != terminal || len(processArgs) != 0 {
@@ -586,6 +634,47 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBackAfterNativeAttachReconcilesSpriteLifecycle(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		lifecycle := sprites.Cold
+		if call > 1 {
+			lifecycle = sprites.Running
+		}
+		return catalog.Inventory{
+			Local:   catalog.SourceResult{Rows: localRows()},
+			Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", lifecycle)},
+		}
+	}
+	ops.prepareSpriteFn = func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error) {
+		return catalog.PreparedNativeAttach{Command: &fakeTerminalCommand{}}, nil
+	}
+	model := ready(t, ops)
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	model, _ = update(t, model, runFirst(t, load))
+	model, _ = update(t, model, press("enter"))
+	model.execCommand = func(tea.ExecCommand, tea.ExecCallback) tea.Cmd {
+		return func() tea.Msg { return attachDone{opID: model.operationID} }
+	}
+	model, prepare := update(t, model, press("enter"))
+	model, attach := update(t, model, runFirst(t, prepare))
+	model, sessions := update(t, model, run(t, attach))
+	model, _ = update(t, model, runFirst(t, sessions))
+	if model.spriteSnapshot.current {
+		t.Fatal("successful native attach left pre-attach provider lifecycle current")
+	}
+
+	model, reconcile := update(t, model, press("esc"))
+	if reconcile == nil || !model.inventoryRefreshing || model.spriteSnapshot.current || !strings.Contains(ansi.Strip(model.View().Content), "stale") {
+		t.Fatalf("back did not invalidate and reconcile lifecycle: refreshing %v current %v view %q cmd %v", model.inventoryRefreshing, model.spriteSnapshot.current, model.View().Content, reconcile)
+	}
+	model, _ = update(t, model, runFirst(t, reconcile))
+	if !model.spriteSnapshot.current || !strings.Contains(ansi.Strip(model.View().Content), "running") || strings.Contains(ansi.Strip(model.View().Content), "cold") {
+		t.Fatalf("reconciled lifecycle = current %v view %q", model.spriteSnapshot.current, model.View().Content)
 	}
 }
 

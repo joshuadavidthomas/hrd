@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestParseArgsRecognizesHelp(t *testing.T) {
@@ -49,6 +52,81 @@ func TestRunRejectsNestedHerdr(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "outside Herdr") {
 		t.Fatalf("stderr = %q, want nested Herdr guidance", output)
+	}
+}
+
+func TestScreenOutputKeepsAlternateScreenAcrossSplitWrites(t *testing.T) {
+	target := ansi.ResetModeAltScreenSaveCursor
+	for split := 1; split < len(target); split++ {
+		t.Run(fmt.Sprintf("split-%d", split), func(t *testing.T) {
+			output, err := os.CreateTemp(t.TempDir(), "terminal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = output.Close() }()
+			screen := newScreenOutput(output)
+			for _, chunk := range []string{"before", target[:split], target[split:], "after"} {
+				if _, err := screen.Write([]byte(chunk)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := screen.Restore(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := output.Seek(0, 0); err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "beforeafter" + ansi.ShowCursor + target
+			if string(got) != want {
+				t.Fatalf("output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestScreenOutputKeepsShellHiddenThroughAttachAndDetach(t *testing.T) {
+	output, err := os.CreateTemp(t.TempDir(), "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = output.Close() }()
+	screen := newScreenOutput(output)
+	trace := []string{
+		ansi.SetModeAltScreenSaveCursor + "picker",
+		ansi.ResetModeAltScreenSaveCursor,
+		ansi.SetModeAltScreenSaveCursor + "remote",
+		ansi.ResetModeAltScreenSaveCursor,
+		ansi.SetModeAltScreenSaveCursor + "picker-restored",
+	}
+	for _, chunk := range trace {
+		if _, err := screen.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := screen.Restore(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := output.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(got), ansi.ResetModeAltScreenSaveCursor); count != 1 {
+		t.Fatalf("alternate-screen resets = %d, want only final restore: %q", count, got)
+	}
+	if !strings.HasSuffix(string(got), ansi.ShowCursor+ansi.ResetModeAltScreenSaveCursor) {
+		t.Fatalf("terminal trace lacks final restore: %q", got)
+	}
+	for _, want := range []string{"picker", "remote", "picker-restored"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("terminal trace lacks %q: %q", want, got)
+		}
 	}
 }
 

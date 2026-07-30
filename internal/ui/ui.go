@@ -438,12 +438,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateSSHKeyChoice(msg)
 	case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
 		if msg.String() == "esc" {
-			m.cancelOperation()
-			m.operationID = m.nextID()
-			m.screen = screenEndpoints
-			m.phase = phaseReady
-			m.browser.ResetFilter()
-			m.syncEndpointItems(m.endpointSelection)
+			return m, m.returnToEndpoints()
 		}
 		return m, nil
 	case phaseInitialLoadFailed:
@@ -480,11 +475,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.screen == screenSprite && !m.browser.SettingFilter() {
 		if key.Matches(msg, m.keys.back) {
-			m.screen = screenEndpoints
-			m.phase = phaseReady
-			m.browser.ResetFilter()
-			m.syncEndpointItems(m.endpointSelection)
-			return m, nil
+			return m, m.returnToEndpoints()
 		}
 		if key.Matches(msg, m.keys.stop) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
@@ -531,6 +522,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.spriteEndpoint = destination
 				m.spriteEndpointSelection = selection
 				m.spriteDetailEndpointID = destination.ID
+				m.spriteSnapshot.current = false
 				m.spriteSnapshotDetail = sourceSnapshot{}
 				m.screen = screenSprite
 				m.phase = phaseLoadingSprite
@@ -632,10 +624,7 @@ func (m Model) updateSpriteInstallConfirmation(msg tea.KeyPressMsg) (tea.Model, 
 		cmd := m.beginInstallSpriteHerdr()
 		return m, tea.Batch(cmd, m.spinner.Tick)
 	case "n", "esc":
-		m.screen = screenEndpoints
-		m.phase = phaseReady
-		m.browser.ResetFilter()
-		m.syncEndpointItems(m.endpointSelection)
+		return m, m.returnToEndpoints()
 	}
 	return m, nil
 }
@@ -958,6 +947,17 @@ func (m Model) updateSSHKeyChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) returnToEndpoints() tea.Cmd {
+	m.screen = screenEndpoints
+	m.phase = phaseReady
+	m.browser.ResetFilter()
+	m.syncEndpointItems(m.endpointSelection)
+	if !m.spriteSnapshot.loaded || m.spriteSnapshot.current {
+		return nil
+	}
+	return tea.Batch(m.beginInventory(), m.spinner.Tick)
+}
+
 func (m *Model) beginInventory() tea.Cmd {
 	m.startOperation()
 	if m.phase != phaseLoading {
@@ -1109,6 +1109,7 @@ func (m *Model) beginAttach() tea.Cmd {
 }
 
 func (m *Model) beginProcessAttach(prepared catalog.PreparedProcessAttach) tea.Cmd {
+	m.invalidateSpriteAttachObservations()
 	command := exec.CommandContext(m.root, "herdr", prepared.HerdrArgs()...)
 	environment := withoutEnvironment(os.Environ(), "SPRITE_TOKEN")
 	if socket := prepared.SSHAuthSocket(); socket != "" {
@@ -1121,9 +1122,19 @@ func (m *Model) beginProcessAttach(prepared catalog.PreparedProcessAttach) tea.C
 }
 
 func (m *Model) beginNativeAttach(prepared catalog.PreparedNativeAttach) tea.Cmd {
+	m.invalidateSpriteAttachObservations()
 	m.phase = phaseAttaching
 	opID := m.operationID
 	return m.execCommand(prepared.Command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
+}
+
+func (m *Model) invalidateSpriteAttachObservations() {
+	if !m.activePrepare.sprite {
+		return
+	}
+	m.spriteSnapshot.current = false
+	m.spriteSnapshotDetail.current = false
+	m.syncSpriteItems(m.selectedID)
 }
 
 func (m *Model) startOperation() {
@@ -1368,16 +1379,6 @@ func (m Model) View() tea.View {
 		}
 	}
 	lines := []string{titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ "+contextName)}
-	for _, notice := range []string{m.notice, m.createNotice, m.refreshNotice} {
-		if notice == "" {
-			continue
-		}
-		style := warningStyle
-		if strings.Contains(strings.ToLower(notice), "failed") || strings.Contains(strings.ToLower(notice), "couldn’t") {
-			style = errorStyle
-		}
-		lines = append(lines, clip(style.Render("! "+printable(notice)), surfaceWidth))
-	}
 
 	footer := m.helpView()
 	footerHeight := lipgloss.Height(footer)
@@ -1390,6 +1391,16 @@ func (m Model) View() tea.View {
 	}
 	surface := fitView(strings.Join(lines, "\n"), surfaceWidth, m.height)
 	content := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, surface)
+	if toast := m.toastView(); toast != "" {
+		canvas := lipgloss.NewCanvas(m.width, m.height)
+		toastY := max(0, min(1, m.height-lipgloss.Height(toast)))
+		layers := lipgloss.NewCompositor(
+			lipgloss.NewLayer(content),
+			lipgloss.NewLayer(toast).X(max(0, (m.width-lipgloss.Width(toast))/2)).Y(toastY).Z(1),
+		)
+		canvas.Compose(layers)
+		content = canvas.Render()
+	}
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.WindowTitle = "hrd · Herdr sessions"
@@ -1422,7 +1433,7 @@ func (m Model) bodyView(width, height int) string {
 	case phaseInstallingSpriteHerdr:
 		return m.busyLine("Installing Herdr on "+m.spriteName()+"… Up to three minutes.", width)
 	case phaseRefreshingSprite:
-		return m.listWithWork("Refreshing sessions on "+m.spriteName()+"…", width, height)
+		return m.listView(width, height)
 	case phaseConfirmingStop:
 		action := "Stop"
 		if m.restart {
@@ -1445,7 +1456,7 @@ func (m Model) bodyView(width, height int) string {
 			if m.activePrepare.transport == catalog.SSHFallback {
 				return m.busyLine("Setting up SSH on "+m.spriteName()+"… Up to three minutes.", width)
 			}
-			return m.busyLine("Waking "+m.spriteName()+" and checking Herdr… Up to three minutes.", width)
+			return fitView(m.transportView(width), width, height)
 		}
 		return m.busyLine("Preparing local session "+printable(m.activePrepare.destination.Label)+"…", width)
 	case phaseConfirmingHostKey:
@@ -1463,11 +1474,11 @@ func (m Model) bodyView(width, height int) string {
 	case phaseChoosingSSHKey:
 		return fitView(m.sshKeyView(), width, height)
 	case phaseAttaching:
+		if m.activePrepare.sprite && m.activePrepare.transport == catalog.NativePreview {
+			return m.spriteReadyView(width, height)
+		}
 		return "Herdr has the terminal."
 	case phaseReady:
-		if m.inventoryRefreshing {
-			return m.listWithWork("Refreshing local and Sprite inventory…", width, height)
-		}
 		if m.screen == screenSprite {
 			return m.spriteReadyView(width, height)
 		}
@@ -1478,6 +1489,54 @@ func (m Model) bodyView(width, height int) string {
 	default:
 		return "Unknown UI state."
 	}
+}
+
+func (m Model) toastView() string {
+	notices := make([]string, 0, 3)
+	for _, notice := range []string{m.notice, m.createNotice, m.refreshNotice} {
+		if notice == "" {
+			continue
+		}
+		style := warningStyle
+		lower := strings.ToLower(notice)
+		if strings.Contains(lower, "failed") || strings.Contains(lower, "couldn’t") {
+			style = errorStyle
+		}
+		notices = append(notices, style.Render("! "+printable(notice)))
+	}
+	progress := ""
+	if m.inventoryRefreshing {
+		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing local and Sprite inventory…")
+	} else if m.phase == phaseRefreshingSprite {
+		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing "+m.spriteName()+" sessions…")
+	}
+	messages := append([]string(nil), notices...)
+	if progress != "" {
+		messages = append(messages, progress)
+	}
+	if len(messages) == 0 {
+		return ""
+	}
+
+	width := max(12, min(72, m.width-4))
+	contentWidth := max(1, width-4)
+	for index, message := range messages {
+		messages[index] = clip(message, contentWidth)
+	}
+	toast := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderStyle.GetForeground()).
+		Background(lipgloss.Color("235")).
+		Padding(0, 1).
+		Width(width).
+		Render(strings.Join(messages, "\n"))
+	if lipgloss.Height(toast) <= m.height {
+		return toast
+	}
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color("235")).
+		Width(max(1, m.width)).
+		Render(clip(messages[0], max(1, m.width)))
 }
 
 func (m Model) busyLine(text string, width int) string {
@@ -1721,6 +1780,8 @@ func (m Model) helpView() string {
 			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "sessions")),
 			m.keys.quit,
 		}
+	case phasePreparing:
+		short = []key.Binding{m.keys.quit}
 	case phaseConfirmingSpriteInstall:
 		short = []key.Binding{m.keys.confirm, m.keys.cancel, m.keys.quit}
 	case phaseConfirmingStop:
