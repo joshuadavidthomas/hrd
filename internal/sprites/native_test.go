@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gorilla/websocket"
 	"github.com/muesli/cancelreader"
 
@@ -632,10 +633,36 @@ func TestNativeCommandExactTransportAndBinaryIO(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	<-serverDone
-	if got := output.String(); got != "remote output" {
-		t.Fatalf("output = %q", got)
+	wantOutput := nativeHandoffScreen("sprite-one", 80, 24) + "remote output" + ansi.ShowCursor + ansi.ResetModeAltScreenSaveCursor
+	if got := output.String(); got != wantOutput {
+		t.Fatalf("output = %q, want %q", got, wantOutput)
 	}
 	assertTerminalRestored(t, terminal, signals)
+}
+
+func TestNativeCommandDrawsHandoffBeforeDialing(t *testing.T) {
+	terminal := &fakeTerminal{cols: 80, rows: 24}
+	reader := newFakeCancelReader()
+	var output bytes.Buffer
+	dialer := observingErrorDialer{observe: func() {
+		if got := output.String(); got != nativeHandoffScreen("sprite-one", 80, 24) {
+			t.Errorf("output before dial = %q", got)
+		}
+	}}
+	command := &NativeCommand{
+		ctx: context.Background(), name: "sprite-one", session: "work", token: "token",
+		deps: nativeDependencies{
+			baseURL: "wss://example.invalid", dialer: dialer, terminal: terminal,
+			newCancelReader: func(io.Reader) (nativeCancelReader, error) { return reader, nil }, resizeSignals: &fakeSignals{},
+		},
+		stdin: bytes.NewReader(nil), stdout: &output, stderr: io.Discard,
+	}
+	if err := command.Run(); err == nil || !strings.Contains(err.Error(), "connect native Sprite terminal failed") {
+		t.Fatalf("Run() error = %v, want dial failure", err)
+	}
+	if !strings.HasSuffix(output.String(), ansi.ShowCursor+ansi.ResetModeAltScreenSaveCursor) {
+		t.Fatalf("output lacks display restoration: %q", output.String())
+	}
 }
 
 func TestNativeCommandRejectsInvalidTerminalDimensions(t *testing.T) {
@@ -816,6 +843,15 @@ type errorDialer struct{ err error }
 
 func (d errorDialer) DialContext(context.Context, string, http.Header) (*websocket.Conn, *http.Response, error) {
 	return nil, nil, d.err
+}
+
+type observingErrorDialer struct {
+	observe func()
+}
+
+func (d observingErrorDialer) DialContext(context.Context, string, http.Header) (*websocket.Conn, *http.Response, error) {
+	d.observe()
+	return nil, nil, errors.New("dial failed")
 }
 
 func testNativeCommand(ctx context.Context, baseURL, token string, terminal *fakeTerminal, reader nativeCancelReader, signals *fakeSignals, output io.Writer) *NativeCommand {

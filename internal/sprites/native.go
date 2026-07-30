@@ -18,7 +18,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gorilla/websocket"
 	"github.com/muesli/cancelreader"
 	sdk "github.com/superfly/sprites-go"
@@ -457,6 +459,16 @@ func (c *NativeCommand) Run() (runErr error) {
 	if err != nil || !validTerminalSize(cols, rows) {
 		return errors.New("read terminal size failed")
 	}
+	if err := writeTerminal(c.stdout, nativeHandoffScreen(c.name, cols, rows)); err != nil {
+		_, _ = io.WriteString(c.stdout, ansi.ShowCursor+ansi.ResetModeAltScreenSaveCursor)
+		return errors.New("draw native terminal handoff failed")
+	}
+	defer func() {
+		if err := writeTerminal(c.stdout, ansi.ShowCursor+ansi.ResetModeAltScreenSaveCursor); err != nil {
+			runErr = errors.Join(runErr, errors.New("restore terminal display failed"))
+		}
+	}()
+
 	state, err := c.deps.terminal.MakeRaw(c.stdin)
 	if err != nil {
 		return errors.New("enter terminal raw mode failed")
@@ -497,6 +509,25 @@ func (c *NativeCommand) Run() (runErr error) {
 
 func validTerminalSize(cols, rows int) bool {
 	return cols > 0 && rows > 0 && cols <= math.MaxUint16 && rows <= math.MaxUint16
+}
+
+func nativeHandoffScreen(name string, cols, rows int) string {
+	label := "Connecting to " + name + "…"
+	if utf8.RuneCountInString(label)+4 > cols {
+		label = "Connecting…"
+	}
+	labelWidth := utf8.RuneCountInString(label)
+	column := max(1, (cols-labelWidth)/2+1)
+	row := max(1, rows/2)
+	return ansi.SetModeAltScreenSaveCursor + ansi.HideCursor + ansi.EraseEntireScreen + ansi.CursorPosition(column, row) + label
+}
+
+func writeTerminal(output io.Writer, data string) error {
+	written, err := io.WriteString(output, data)
+	if err != nil || written != len(data) {
+		return errors.New("terminal write failed")
+	}
+	return nil
 }
 
 func buildNativeExecURL(baseURL, name, session string, cols, rows int) (string, error) {
