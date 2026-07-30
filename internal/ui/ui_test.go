@@ -292,6 +292,47 @@ func TestMainSurfaceKeepsNamePaddingAndAlignedStatusColumn(t *testing.T) {
 	}
 }
 
+func TestSpriteDetailPanelUsesContentWidth(t *testing.T) {
+	t.Run("short name uses minimum", func(t *testing.T) {
+		model := spriteReady(t, &fakeSpriteOperations{fakeOperations: &fakeOperations{}})
+		model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
+		for _, line := range strings.Split(ansi.Strip(model.View().Content), "\n") {
+			if strings.Contains(line, "devbox sessions") && strings.Contains(line, "╭") {
+				if got := lipgloss.Width(strings.TrimSpace(line)); got != minBrowserPanelWidth {
+					t.Fatalf("detail panel width = %d, want %d: %q", got, minBrowserPanelWidth, line)
+				}
+				return
+			}
+		}
+		t.Fatal("detail panel heading not rendered")
+	})
+
+	t.Run("long Sprite name expands within maximum", func(t *testing.T) {
+		name := strings.Repeat("a", 63)
+		ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+		ops.inventoryFn = func(context.Context, int) catalog.Inventory {
+			return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows(name, sprites.Running)}}
+		}
+		model := ready(t, ops)
+		model.browser.Select(2)
+		model, load := update(t, model, press("enter"))
+		model, _ = update(t, model, runFirst(t, load))
+		model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
+		for _, line := range strings.Split(ansi.Strip(model.View().Content), "\n") {
+			if strings.Contains(line, name) && strings.Contains(line, "╭") {
+				if got := lipgloss.Width(strings.TrimSpace(line)); got != maxBrowserPanelWidth {
+					t.Fatalf("long-name detail width = %d, want %d: %q", got, maxBrowserPanelWidth, line)
+				}
+				if !strings.HasSuffix(strings.TrimSpace(line), "╮") {
+					t.Fatalf("long-name detail heading lost its border: %q", line)
+				}
+				return
+			}
+		}
+		t.Fatal("long-name detail panel heading not rendered")
+	})
+}
+
 func TestRefreshToastDoesNotMoveCenteredContent(t *testing.T) {
 	model := ready(t, &fakeOperations{})
 	model, _ = update(t, model, tea.WindowSizeMsg{Width: 120, Height: 40})

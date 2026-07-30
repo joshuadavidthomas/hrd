@@ -1577,10 +1577,7 @@ func (m Model) listWithWork(text string, width, height int) string {
 }
 
 func (m Model) listView(width, height int) string {
-	panelWidth := width
-	if m.screen == screenEndpoints {
-		panelWidth = m.browserPanelWidth(width)
-	}
+	panelWidth := m.browserPanelWidth(width)
 	centerPanel := func(panel string) string {
 		return lipgloss.PlaceHorizontal(width, lipgloss.Center, panel)
 	}
@@ -1707,11 +1704,12 @@ type renderedBrowserItem struct {
 func renderBrowserPanel(title, badge string, rows []renderedBrowserItem, width int, empty string) string {
 	width = max(12, width)
 	innerWidth := width - 2
-	titleText := " " + printable(title) + " "
 	badgeText := ""
 	if badge != "" {
 		badgeText = " " + printable(badge) + " "
 	}
+	maxTitleWidth := max(1, width-lipgloss.Width(badgeText)-7)
+	titleText := " " + clip(printable(title), maxTitleWidth) + " "
 	fill := max(1, innerWidth-lipgloss.Width(titleText)-lipgloss.Width(badgeText)-2)
 	top := borderStyle.Render("╭─") + titleStyle.Render(titleText) + borderStyle.Render(strings.Repeat("─", fill))
 	if badgeText != "" {
@@ -1941,6 +1939,11 @@ func (m Model) browserPanelWidth(available int) int {
 		rowWidth := lipgloss.Width(printable(item.destination.Label)) +
 			browserMarkerWidth + browserStatusGap + browserStatusWidth + browserPanelChrome
 		ideal = max(ideal, rowWidth)
+	}
+	if m.screen == screenSprite {
+		title := m.spriteName() + " sessions"
+		badge := fmt.Sprintf("%d", len(m.spriteSnapshotDetail.rows))
+		ideal = max(ideal, lipgloss.Width(title)+lipgloss.Width(badge)+9)
 	}
 	return max(1, min(available, min(maxBrowserPanelWidth, ideal)))
 }
