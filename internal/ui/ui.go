@@ -1363,6 +1363,9 @@ func (m Model) View() tea.View {
 		if endpoint, ok := m.spriteEndpoint.Endpoint.(catalog.SpriteEndpoint); ok {
 			contextName = printable(endpoint.Name)
 		}
+		if m.phase == phaseChoosingSpriteTransport && m.confirmDest.Label != "" {
+			contextName += " / " + printable(m.confirmDest.Label)
+		}
 	}
 	lines := []string{titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ "+contextName)}
 	for _, notice := range []string{m.notice, m.createNotice, m.refreshNotice} {
@@ -1436,7 +1439,7 @@ func (m Model) bodyView(width, height int) string {
 		}
 		return m.listWithWork(action+printable(m.confirmDest.Label)+"…", width, height)
 	case phaseChoosingSpriteTransport:
-		return fitView(m.transportView(), width, height)
+		return fitView(m.transportView(width), width, height)
 	case phasePreparing:
 		if m.activePrepare.sprite {
 			if m.activePrepare.transport == catalog.SSHFallback {
@@ -1609,30 +1612,73 @@ func (m Model) spriteReadyView(width, height int) string {
 	return m.listView(width, height)
 }
 
-func (m Model) transportView() string {
-	options := []struct {
+func (m Model) transportView(width int) string {
+	type transportOption struct {
 		transport catalog.SpriteTransport
 		title     string
+		badge     string
 		detail    string
-	}{
-		{catalog.NativePreview, "Native Sprite terminal", "Default · Herdr runs inside the Sprite"},
-		{catalog.SSHFallback, "SSH", "Alternate transport · local Herdr uses your SSH key"},
 	}
-	action := "attach to "
-	if m.restart {
-		action = "restart and attach to "
+	options := []transportOption{
+		{
+			transport: catalog.NativePreview,
+			title:     "Native",
+			badge:     "recommended",
+			detail:    "Herdr runs inside the Sprite. No SSH service or key.",
+		},
+		{
+			transport: catalog.SSHFallback,
+			title:     "SSH",
+			detail:    "Local Herdr connects through your selected SSH key.",
+		},
 	}
-	lines := []string{"Choose transport to " + action + printable(m.confirmDest.Label)}
-	for _, option := range options {
-		marker := "  "
-		title := option.title
-		if m.transport == option.transport {
-			marker = accentStyle.Render("› ")
-			title = selectedStyle.Render(title)
+	chooserWidth := max(12, min(68, width))
+	rows := make([]string, 0, len(options)*3)
+	for index, option := range options {
+		if index > 0 {
+			rows = append(rows, borderStyle.Render("├"+strings.Repeat("─", chooserWidth-2)+"┤"))
 		}
-		lines = append(lines, marker+title, "  "+mutedStyle.Render(option.detail))
+		rows = append(rows, renderTransportOption(option.title, option.badge, option.detail, option.transport == m.transport, chooserWidth))
 	}
-	return strings.Join(lines, "\n")
+	panel := borderStyle.Render("╭"+strings.Repeat("─", chooserWidth-2)+"╮") + "\n" +
+		strings.Join(rows, "\n") + "\n" +
+		borderStyle.Render("╰"+strings.Repeat("─", chooserWidth-2)+"╯")
+	heading := "Choose a connection"
+	if m.restart {
+		heading = "Choose a connection for the restarted session"
+	}
+	content := strings.Join([]string{
+		titleStyle.Render(heading),
+		mutedStyle.Render("Select where Herdr itself should run."),
+		"",
+		panel,
+	}, "\n")
+	return lipgloss.PlaceHorizontal(width, lipgloss.Center, content)
+}
+
+func renderTransportOption(title, badge, detail string, selected bool, width int) string {
+	contentWidth := max(1, width-4)
+	marker := mutedStyle.Render("○ ")
+	titleStyleForOption := lipgloss.NewStyle()
+	badgeStyle := mutedStyle
+	rowStyle := lipgloss.NewStyle()
+	if selected {
+		marker = accentStyle.Render("● ")
+		titleStyleForOption = selectedStyle
+		badgeStyle = accentStyle
+		rowStyle = selectedRowStyle
+	}
+	badgeWidth := lipgloss.Width(badge)
+	titleWidth := max(1, contentWidth-2-badgeWidth)
+	first := marker + titleStyleForOption.Width(titleWidth).Render(clip(title, titleWidth))
+	if badge != "" {
+		first += badgeStyle.Render(badge)
+	}
+	second := "  " + mutedStyle.Render(clip(detail, max(1, contentWidth-2)))
+	first = rowStyle.Width(contentWidth).Render(first)
+	second = rowStyle.Width(contentWidth).Render(second)
+	return borderStyle.Render("│") + " " + first + " " + borderStyle.Render("│") + "\n" +
+		borderStyle.Render("│") + " " + second + " " + borderStyle.Render("│")
 }
 
 func (m Model) sshKeyView() string {
@@ -1669,7 +1715,12 @@ func (m Model) helpView() string {
 	case phaseNamingSprite:
 		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), m.keys.back, m.keys.force}
 	case phaseChoosingSpriteTransport:
-		short = []key.Binding{key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")), key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "continue")), m.keys.back, m.keys.quit}
+		short = []key.Binding{
+			key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "connect")),
+			key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "sessions")),
+			m.keys.quit,
+		}
 	case phaseConfirmingSpriteInstall:
 		short = []key.Binding{m.keys.confirm, m.keys.cancel, m.keys.quit}
 	case phaseConfirmingStop:

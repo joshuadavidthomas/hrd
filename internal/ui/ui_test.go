@@ -500,6 +500,32 @@ func TestSpriteDetailSnapshotIsResetAcrossEndpoints(t *testing.T) {
 	}
 }
 
+func TestTransportChooserUsesAnAlignedChoicePanel(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := spriteReady(t, ops)
+	model, _ = update(t, model, press("enter"))
+	plain := ansi.Strip(model.View().Content)
+	for _, want := range []string{
+		"hrd  / devbox / default",
+		"Choose a connection",
+		"Select where Herdr itself should run.",
+		"Native",
+		"recommended",
+		"No SSH service or key.",
+		"SSH",
+		"Local Herdr connects through your selected SSH key.",
+		"enter connect",
+		"esc sessions",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("transport chooser lacks %q: %q", want, plain)
+		}
+	}
+	if strings.Contains(plain, "Alternate transport") || strings.Contains(plain, "attach to default") {
+		t.Fatalf("transport chooser retains old copy: %q", plain)
+	}
+}
+
 func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
