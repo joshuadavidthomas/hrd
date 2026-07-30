@@ -147,8 +147,8 @@ func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 	if model.phase != phaseLoading || model.operationID != 1 || len(model.browser.Items()) != 0 {
 		t.Fatalf("new model phase/id/items = %v/%d/%d", model.phase, model.operationID, len(model.browser.Items()))
 	}
-	if content := model.View().Content; !strings.Contains(content, "Loading local sessions") {
-		t.Fatalf("loading view = %q", content)
+	if view := model.View(); view.Content != "" || !view.AltScreen || view.WindowTitle == "" {
+		t.Fatalf("initial view = content %q alt %v title %q", view.Content, view.AltScreen, view.WindowTitle)
 	}
 	model, cmd := update(t, model, run(t, model.initialCmd))
 	if cmd != nil || model.phase != phaseReady || len(model.browser.Items()) != 2 || ops.inventoryCalls.Load() != 1 {
@@ -1145,6 +1145,8 @@ func TestBrowserLayoutUsesCompactSpacingAndConditionalPagination(t *testing.T) {
 
 func TestSpinnerProgressesAcrossBusyState(t *testing.T) {
 	model := New(context.Background(), &fakeOperations{})
+	model.phase = phaseCreatingSprite
+	model.nameInput.SetValue("new-sprite")
 	before := model.spinner.View()
 	model, cmd := update(t, model, model.spinner.Tick())
 	if cmd == nil || model.spinner.View() == before {

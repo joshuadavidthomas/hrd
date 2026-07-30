@@ -340,9 +340,9 @@ func New(root context.Context, operations Operations) Model {
 	return m
 }
 
-// Init starts inventory loading, animation, and silent background refresh.
+// Init starts inventory loading and silent background refresh.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.initialCmd, m.spinner.Tick, scheduleRefresh())
+	return tea.Batch(m.initialCmd, scheduleRefresh())
 }
 
 func scheduleRefresh() tea.Cmd {
@@ -447,7 +447,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.phase = phaseLoading
 			m.refreshNotice = ""
 			cmd := m.beginInventory()
-			return m, tea.Batch(cmd, m.spinner.Tick)
+			return m, cmd
 		}
 		return m, nil
 	case phaseAddingSSHKey, phaseAttaching:
@@ -1339,7 +1339,7 @@ func (m Model) busy() bool {
 		return true
 	}
 	switch m.phase {
-	case phaseLoading, phaseCreatingSprite, phaseLoadingSprite, phaseRefreshingSprite,
+	case phaseCreatingSprite, phaseLoadingSprite, phaseRefreshingSprite,
 		phaseInstallingSpriteHerdr, phaseStopping, phasePreparing, phaseStartingSSHAgent:
 		return true
 	default:
@@ -1360,6 +1360,13 @@ var (
 
 // View renders a compact surface centered when the terminal has room.
 func (m Model) View() tea.View {
+	if m.phase == phaseLoading {
+		view := tea.NewView("")
+		view.AltScreen = true
+		view.WindowTitle = "hrd · Herdr sessions"
+		return view
+	}
+
 	surfaceWidth := m.surfaceWidth()
 	m.help.SetWidth(surfaceWidth)
 
@@ -1435,7 +1442,7 @@ func (m Model) breadcrumbSegments() []string {
 func (m Model) bodyView(width, height int) string {
 	switch m.phase {
 	case phaseLoading:
-		return m.busyLine("Loading local sessions and Sprite endpoints…", width)
+		return ""
 	case phaseInitialLoadFailed:
 		return clip("No inventory source loaded. Press r to retry.", width)
 	case phaseNamingSprite:
