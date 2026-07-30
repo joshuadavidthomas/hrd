@@ -1457,13 +1457,9 @@ func (m Model) bodyView(width, height int) string {
 	case phaseLoadingSprite:
 		return m.spriteSessionsLoadingView(width, height)
 	case phaseConfirmingSpriteInstall:
-		return fitView(strings.Join([]string{
-			titleStyle.Render("Install Herdr on " + m.spriteName() + "?"),
-			"hrd will download and run this installer inside the Sprite:",
-			accentStyle.Render("https://herdr.dev/install.sh"),
-		}, "\n"), width, height)
+		return titleStyle.Render("Install Herdr?")
 	case phaseInstallingSpriteHerdr:
-		return m.busyLine("Installing Herdr on "+m.spriteName()+"… Up to three minutes.", width)
+		return m.busyLine("Installing Herdr…", width)
 	case phaseRefreshingSprite:
 		return m.listView(width, height)
 	case phaseConfirmingStop:

@@ -674,9 +674,13 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 	if model.phase != phaseConfirmingSpriteInstall || ops.installCalls.Load() != 0 {
 		t.Fatalf("missing Herdr phase/install calls = %v/%d", model.phase, ops.installCalls.Load())
 	}
-	for _, want := range []string{"Install Herdr", "download and run", "https://herdr.dev/install.sh"} {
-		if !strings.Contains(model.View().Content, want) {
-			t.Errorf("install confirmation lacks %q: %q", want, model.View().Content)
+	confirmation := ansi.Strip(model.bodyView(model.surfaceWidth(), model.height))
+	if !strings.Contains(confirmation, "Install Herdr?") {
+		t.Fatalf("install confirmation = %q", confirmation)
+	}
+	for _, unwanted := range []string{"devbox", "download", "install.sh", "three minutes"} {
+		if strings.Contains(confirmation, unwanted) {
+			t.Errorf("install confirmation contains %q: %q", unwanted, confirmation)
 		}
 	}
 	model, cmd := update(t, model, press("n"))
@@ -694,6 +698,10 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 	model, install := update(t, model, press("y"))
 	if model.phase != phaseInstallingSpriteHerdr || install == nil || ops.installCalls.Load() != 0 {
 		t.Fatalf("install start = phase %v calls %d cmd %v", model.phase, ops.installCalls.Load(), install)
+	}
+	progress := ansi.Strip(model.bodyView(model.surfaceWidth(), model.height))
+	if !strings.Contains(progress, "Installing Herdr…") || strings.Contains(progress, "devbox") || strings.Contains(progress, "three minutes") {
+		t.Fatalf("install progress = %q", progress)
 	}
 	ops.listSpriteFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, _ int) ([]catalog.Destination, error) {
 		return spriteSessionRows("devbox", sprites.Running), nil
