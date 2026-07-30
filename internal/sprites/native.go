@@ -41,6 +41,7 @@ const (
 	herdrSessionListTimeout   = 10 * time.Second
 	herdrSessionStopTimeout   = 10 * time.Second
 	cleanupTimeout            = 5 * time.Second
+	nativeInitialResizeDelay  = 10 * time.Millisecond
 	nativePingInterval        = 15 * time.Second
 	nativeWriteTimeout        = 10 * time.Second
 )
@@ -492,7 +493,7 @@ func (c *NativeCommand) Run() (runErr error) {
 		return errors.New("connect native Sprite terminal failed")
 	}
 
-	return c.runPTY(ctx, cancel, ws, reader)
+	return c.runPTY(ctx, cancel, ws, reader, cols, rows)
 }
 
 func validTerminalSize(cols, rows int) bool {
@@ -539,7 +540,7 @@ type nativeResizeMessage struct {
 	Rows int    `json:"rows"`
 }
 
-func (c *NativeCommand) runPTY(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, reader nativeCancelReader) error {
+func (c *NativeCommand) runPTY(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, reader nativeCancelReader, initialCols, initialRows int) error {
 	done := make(chan struct{})
 	workerErr := make(chan error, 3)
 	resize := make(chan os.Signal, 1)
@@ -551,8 +552,41 @@ func (c *NativeCommand) runPTY(ctx context.Context, cancel context.CancelFunc, w
 		defer writes.Unlock()
 		return ws.WriteMessage(messageType, data)
 	}
+	writeResize := func(cols, rows int) error {
+		payload, err := json.Marshal(nativeResizeMessage{Type: "resize", Cols: cols, Rows: rows})
+		if err != nil {
+			return errors.New("encode terminal resize failed")
+		}
+		if err := write(websocket.TextMessage, payload); err != nil {
+			return errors.New("write terminal resize failed")
+		}
+		return nil
+	}
 
 	var workers sync.WaitGroup
+	defer func() {
+		c.deps.resizeSignals.Stop(resize)
+		close(done)
+		reader.Cancel()
+		_ = ws.Close()
+		cancel()
+		workers.Wait()
+	}()
+
+	// The exec query allocates the PTY, but interactive apps may not paint until
+	// the provider delivers a resize control frame. Match the provider SDK's
+	// short post-connect delay so the remote PTY is ready to consume it.
+	initialResize := time.NewTimer(nativeInitialResizeDelay)
+	defer initialResize.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-initialResize.C:
+		if err := writeResize(initialCols, initialRows); err != nil {
+			return fmt.Errorf("initialize native Sprite terminal: %w", err)
+		}
+	}
+
 	workers.Add(4)
 	go func() {
 		defer workers.Done()
@@ -589,14 +623,8 @@ func (c *NativeCommand) runPTY(ctx context.Context, cancel context.CancelFunc, w
 					_ = ws.Close()
 					return
 				}
-				payload, err := json.Marshal(nativeResizeMessage{Type: "resize", Cols: cols, Rows: rows})
-				if err != nil {
-					reportNativeWorkerError(workerErr, errors.New("encode terminal resize failed"))
-					_ = ws.Close()
-					return
-				}
-				if err := write(websocket.TextMessage, payload); err != nil {
-					reportNativeWorkerError(workerErr, errors.New("write terminal resize failed"))
+				if err := writeResize(cols, rows); err != nil {
+					reportNativeWorkerError(workerErr, fmt.Errorf("resize native Sprite terminal: %w", err))
 					_ = ws.Close()
 					return
 				}
@@ -631,15 +659,6 @@ func (c *NativeCommand) runPTY(ctx context.Context, cancel context.CancelFunc, w
 			_ = ws.Close()
 		case <-done:
 		}
-	}()
-
-	defer func() {
-		c.deps.resizeSignals.Stop(resize)
-		close(done)
-		reader.Cancel()
-		_ = ws.Close()
-		cancel()
-		workers.Wait()
 	}()
 
 	for {

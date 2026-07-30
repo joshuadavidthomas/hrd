@@ -588,6 +588,18 @@ func newWebSocketTestServer(t *testing.T, handler func(*websocket.Conn, *http.Re
 	return websocketTestServer{server: server, baseURL: "ws" + strings.TrimPrefix(server.URL, "http")}
 }
 
+func readNativeResize(t *testing.T, conn *websocket.Conn, want string) {
+	t.Helper()
+	messageType, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Errorf("read resize: %v", err)
+		return
+	}
+	if messageType != websocket.TextMessage || string(data) != want {
+		t.Errorf("resize frame = (%d, %s), want %s", messageType, data, want)
+	}
+}
+
 func TestNativeCommandExactTransportAndBinaryIO(t *testing.T) {
 	const token = "transport-secret"
 	serverDone := make(chan struct{})
@@ -612,6 +624,7 @@ func TestNativeCommandExactTransportAndBinaryIO(t *testing.T) {
 		if got := request.Header.Get("Authorization"); got != "Bearer "+token {
 			t.Errorf("Authorization = %q", got)
 		}
+		readNativeResize(t, conn, `{"type":"resize","cols":80,"rows":24}`)
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			t.Errorf("read stdin: %v", err)
@@ -657,14 +670,8 @@ func TestNativeCommandForwardsResize(t *testing.T) {
 	server := newWebSocketTestServer(t, func(conn *websocket.Conn, _ *http.Request) {
 		defer func() { _ = conn.Close() }()
 		close(connected)
-		messageType, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Errorf("read resize: %v", err)
-			return
-		}
-		if messageType != websocket.TextMessage || string(data) != `{"type":"resize","cols":120,"rows":40}` {
-			t.Errorf("resize frame = (%d, %s)", messageType, data)
-		}
+		readNativeResize(t, conn, `{"type":"resize","cols":80,"rows":24}`)
+		readNativeResize(t, conn, `{"type":"resize","cols":120,"rows":40}`)
 		_ = conn.WriteJSON(map[string]any{"type": "exit", "exit_code": 0})
 	})
 	terminal := &fakeTerminal{cols: 80, rows: 24}
@@ -724,8 +731,12 @@ func TestNativeCommandCancellationClosesSocketAndReader(t *testing.T) {
 	server := newWebSocketTestServer(t, func(conn *websocket.Conn, _ *http.Request) {
 		defer func() { _ = conn.Close() }()
 		close(connected)
-		_, _, _ = conn.ReadMessage()
-		close(serverClosed)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				close(serverClosed)
+				return
+			}
+		}
 	})
 	terminal := &fakeTerminal{cols: 80, rows: 24}
 	reader := newFakeCancelReader()
@@ -760,8 +771,12 @@ func TestNativeCommandInputEOFClosesSocketAndRestoresTerminal(t *testing.T) {
 	serverClosed := make(chan struct{})
 	server := newWebSocketTestServer(t, func(conn *websocket.Conn, _ *http.Request) {
 		defer func() { _ = conn.Close() }()
-		_, _, _ = conn.ReadMessage()
-		close(serverClosed)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				close(serverClosed)
+				return
+			}
+		}
 	})
 	terminal := &fakeTerminal{cols: 80, rows: 24}
 	signals := &fakeSignals{}
