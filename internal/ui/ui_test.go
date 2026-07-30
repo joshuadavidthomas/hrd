@@ -637,9 +637,15 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 	if model.screen != screenSprite || model.phase != phaseLoadingSprite || load == nil || ops.listSpriteCalls.Load() != 0 {
 		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.phase, model.screen, ops.listSpriteCalls.Load(), load)
 	}
-	for _, want := range []string{"Waking devbox", "checking Herdr", "three minutes"} {
-		if !strings.Contains(model.View().Content, want) {
-			t.Errorf("loading copy lacks %q: %q", want, model.View().Content)
+	loadingView := ansi.Strip(model.View().Content)
+	for _, want := range []string{"devbox sessions", "Loading sessions", ansi.Strip(model.spinner.View())} {
+		if !strings.Contains(loadingView, want) {
+			t.Errorf("loading detail lacks %q: %q", want, loadingView)
+		}
+	}
+	for _, unwanted := range []string{"Waking", "checking Herdr", "three minutes"} {
+		if strings.Contains(loadingView, unwanted) {
+			t.Errorf("loading detail contains %q: %q", unwanted, loadingView)
 		}
 	}
 	model, _ = update(t, model, runFirst(t, load))
@@ -895,8 +901,8 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 			}
 			if tc.transport == catalog.NativePreview {
 				view := ansi.Strip(model.View().Content)
-				if !strings.Contains(view, "Choose a connection") || strings.Contains(view, "Waking") || strings.Contains(view, "Herdr has the terminal") {
-					t.Fatalf("native preparation flashed an intermediate screen: %q", view)
+				if !strings.Contains(view, "Choose a connection") || !strings.Contains(view, "Preparing native connection") || !strings.Contains(view, ansi.Strip(model.spinner.View())) || strings.Contains(view, "Waking") || strings.Contains(view, "Herdr has the terminal") {
+					t.Fatalf("native preparation feedback = %q", view)
 				}
 			}
 			model, handoff := update(t, model, runFirst(t, prepare))

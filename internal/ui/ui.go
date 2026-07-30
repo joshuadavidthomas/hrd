@@ -1448,7 +1448,7 @@ func (m Model) bodyView(width, height int) string {
 	case phaseCreatingSprite:
 		return m.busyLine("Creating "+m.nameInput.Value()+"…", width)
 	case phaseLoadingSprite:
-		return m.busyLine("Waking "+m.spriteName()+" and checking Herdr… Up to three minutes.", width)
+		return m.spriteSessionsLoadingView(width, height)
 	case phaseConfirmingSpriteInstall:
 		return fitView(strings.Join([]string{
 			titleStyle.Render("Install Herdr on " + m.spriteName() + "?"),
@@ -1731,6 +1731,13 @@ func renderBrowserPanel(title, badge string, rows []renderedBrowserItem, width i
 	return strings.Join(append(append([]string{top}, body...), bottom), "\n")
 }
 
+func (m Model) spriteSessionsLoadingView(width, height int) string {
+	panelWidth := m.browserPanelWidth(width)
+	loading := m.spinner.View() + " " + mutedStyle.Render("Loading sessions…")
+	panel := renderBrowserPanel(m.spriteName()+" sessions", "", nil, panelWidth, loading)
+	return fitView(lipgloss.PlaceHorizontal(width, lipgloss.Center, panel), width, height)
+}
+
 func (m Model) spriteReadyView(width, height int) string {
 	return m.listView(width, height)
 }
@@ -1770,12 +1777,16 @@ func (m Model) transportView(width int) string {
 	if m.restart {
 		heading = "Choose a connection for the restarted session"
 	}
-	content := strings.Join([]string{
+	parts := []string{
 		titleStyle.Render(heading),
 		mutedStyle.Render("Select where Herdr itself should run."),
 		"",
 		panel,
-	}, "\n")
+	}
+	if m.phase == phasePreparing && m.transport == catalog.NativePreview {
+		parts = append(parts, "", m.busyLine("Preparing native connection…", chooserWidth))
+	}
+	content := strings.Join(parts, "\n")
 	return lipgloss.PlaceHorizontal(width, lipgloss.Center, content)
 }
 
