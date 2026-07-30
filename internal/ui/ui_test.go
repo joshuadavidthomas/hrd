@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
@@ -160,6 +161,43 @@ func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 	}
 	if !view.AltScreen || view.WindowTitle == "" {
 		t.Fatalf("view flags = alt %v title %q", view.AltScreen, view.WindowTitle)
+	}
+}
+
+func TestWideReadyViewUsesCenteredContentHeightSections(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := ready(t, ops)
+	model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
+	plain := ansi.Strip(model.View().Content)
+	lines := strings.Split(plain, "\n")
+	first, last := -1, -1
+	for index, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if first < 0 {
+			first = index
+		}
+		last = index
+	}
+	if first < 5 || last-first > 16 {
+		t.Fatalf("content bounds = %d..%d, want a compact vertically centered surface: %q", first, last, plain)
+	}
+	if leading := len(lines[first]) - len(strings.TrimLeft(lines[first], " ")); leading < 20 {
+		t.Fatalf("content starts at column %d, want horizontal centering: %q", leading, lines[first])
+	}
+	for _, want := range []string{"Local sessions", "Sprites", "checked just now"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("grouped view lacks %q: %q", want, plain)
+		}
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "default") && !strings.Contains(line, "running") {
+			t.Fatalf("session status is not aligned on one row: %q", line)
+		}
+		if strings.Contains(line, "devbox") && !strings.Contains(line, "running") {
+			t.Fatalf("Sprite status is not aligned on one row: %q", line)
+		}
 	}
 }
 

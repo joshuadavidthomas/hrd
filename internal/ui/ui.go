@@ -89,15 +89,20 @@ type sourceSnapshot struct {
 
 type browserItem struct {
 	destination catalog.Destination
-	description string
+	kind        string
+	symbol      string
+	state       string
+	stateStyle  lipgloss.Style
 	stale       bool
 }
 
-func (i browserItem) FilterValue() string { return printable(i.destination.Label) }
+func (i browserItem) FilterValue() string {
+	return strings.Join([]string{printable(i.destination.Label), i.kind, i.state}, " ")
+}
 
 type browserDelegate struct{}
 
-func (browserDelegate) Height() int                         { return 2 }
+func (browserDelegate) Height() int                         { return 1 }
 func (browserDelegate) Spacing() int                        { return 0 }
 func (browserDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 func (browserDelegate) Render(w io.Writer, model list.Model, index int, raw list.Item) {
@@ -105,21 +110,29 @@ func (browserDelegate) Render(w io.Writer, model list.Model, index int, raw list
 	if !ok {
 		return
 	}
-	width := max(1, model.Width()-2)
-	selected := index == model.Index()
+	_, _ = fmt.Fprint(w, renderBrowserRow(item, index == model.Index(), max(1, model.Width()-1)))
+}
+
+func renderBrowserRow(item browserItem, selected bool, width int) string {
 	marker := "  "
-	title := printable(item.destination.Label)
-	detail := printable(item.description)
+	labelStyle := lipgloss.NewStyle()
 	if selected {
 		marker = accentStyle.Render("› ")
-		title = selectedStyle.Render(title)
+		labelStyle = selectedStyle
 	}
+	stateWidth := min(13, max(8, width/4))
+	labelWidth := max(1, width-2-stateWidth-1)
+	label := labelStyle.Width(labelWidth).Render(clip(printable(item.destination.Label), labelWidth))
+	stateStyle := item.stateStyle
 	if item.stale {
-		detail = warningStyle.Render(detail)
-	} else {
-		detail = mutedStyle.Render(detail)
+		stateStyle = warningStyle
 	}
-	_, _ = fmt.Fprint(w, marker+clip(title, width)+"\n  "+clip(detail, width))
+	state := stateStyle.Width(stateWidth).Render(clip(item.symbol+" "+item.state, stateWidth))
+	row := marker + label + " " + state
+	if selected {
+		row = selectedRowStyle.Width(width).Render(row)
+	}
+	return clip(row, width)
 }
 
 type keyMap struct {
@@ -289,6 +302,15 @@ func New(root context.Context, operations Operations) Model {
 	browser.KeyMap.ForceQuit.SetEnabled(false)
 
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(accentStyle))
+	helpModel := help.New()
+	helpStyles := help.DefaultDarkStyles()
+	helpStyles.ShortKey = accentStyle.Bold(true)
+	helpStyles.ShortDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	helpStyles.ShortSeparator = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	helpStyles.FullKey = helpStyles.ShortKey
+	helpStyles.FullDesc = helpStyles.ShortDesc
+	helpStyles.FullSeparator = helpStyles.ShortSeparator
+	helpModel.Styles = helpStyles
 	name := textinput.New()
 	name.Prompt = ""
 	name.Placeholder = "lowercase-name"
@@ -308,7 +330,7 @@ func New(root context.Context, operations Operations) Model {
 		height:      defaultHeight,
 		browser:     browser,
 		spinner:     spin,
-		help:        help.New(),
+		help:        helpModel,
 		nameInput:   name,
 		now:         time.Now,
 	}
@@ -1152,10 +1174,8 @@ func (m Model) selectedSpriteSessionForMutation() (catalog.Destination, bool) {
 
 func (m *Model) syncEndpointItems(selected catalog.DestinationID) {
 	items := make([]list.Item, 0, len(m.destinations))
-	now := m.now()
 	for _, destination := range m.destinations {
-		stale := !m.destinationCurrent(destination)
-		items = append(items, browserItem{destination: destination, stale: stale, description: m.endpointDescription(destination, stale, now)})
+		items = append(items, m.endpointBrowserItem(destination, !m.destinationCurrent(destination)))
 	}
 	m.replaceBrowserItems(items)
 	m.selectListID(selected)
@@ -1167,15 +1187,24 @@ func (m *Model) syncSpriteItems(selected catalog.DestinationID) {
 	items := make([]list.Item, 0, len(m.spriteSnapshotDetail.rows))
 	for _, destination := range m.spriteSnapshotDetail.rows {
 		status, _ := destination.Status.(catalog.SpriteSessionStatus)
-		state := "stopped"
+		item := browserItem{
+			destination: destination,
+			kind:        "Session",
+			symbol:      "○",
+			state:       "stopped",
+			stateStyle:  mutedStyle,
+			stale:       !m.spriteSnapshotDetail.current,
+		}
 		if status.Running {
-			state = "running"
+			item.symbol = "●"
+			item.state = "running"
+			item.stateStyle = runningStyle
 		}
-		description := state
-		if !m.spriteSnapshotDetail.current {
-			description += " · stale"
+		if item.stale {
+			item.symbol = "!"
+			item.state = "stale"
 		}
-		items = append(items, browserItem{destination: destination, stale: !m.spriteSnapshotDetail.current, description: description})
+		items = append(items, item)
 	}
 	m.replaceBrowserItems(items)
 	m.selectListID(selected)
@@ -1233,27 +1262,39 @@ func (m Model) destinationCurrent(destination catalog.Destination) bool {
 	}
 }
 
-func (m Model) endpointDescription(destination catalog.Destination, stale bool, now time.Time) string {
+func (m Model) endpointBrowserItem(destination catalog.Destination, stale bool) browserItem {
+	item := browserItem{destination: destination, symbol: "?", state: "unknown", stateStyle: mutedStyle, stale: stale}
 	switch status := destination.Status.(type) {
 	case catalog.LocalSessionStatus:
-		state := "stopped"
+		item.kind = "Local"
+		item.symbol = "○"
+		item.state = "stopped"
 		if status.Running {
-			state = "running"
+			item.symbol = "●"
+			item.state = "running"
+			item.stateStyle = runningStyle
 		}
-		result := "Local · " + state
-		if stale {
-			result += " · stale · checked " + age(now, m.localSnapshot.observedAt)
-		}
-		return result
 	case catalog.SpriteStatus:
-		result := "Sprite API · " + string(status.Lifecycle) + " · checked " + age(now, m.spriteSnapshot.observedAt)
-		if stale {
-			result += " · stale"
+		item.kind = "Sprite"
+		switch status.Lifecycle {
+		case spriteapi.Running:
+			item.symbol = "●"
+			item.state = "running"
+			item.stateStyle = runningStyle
+		case spriteapi.Warm:
+			item.symbol = "◐"
+			item.state = "warm"
+			item.stateStyle = warningStyle
+		case spriteapi.Cold:
+			item.symbol = "○"
+			item.state = "cold"
 		}
-		return result
-	default:
-		return "Unknown source"
 	}
+	if stale {
+		item.symbol = "!"
+		item.state = "stale"
+	}
+	return item
 }
 
 func age(now, observed time.Time) string {
@@ -1300,35 +1341,30 @@ func (m Model) busy() bool {
 }
 
 var (
-	accentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	titleStyle    = lipgloss.NewStyle().Bold(true)
-	mutedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	warningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	borderStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	accentStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	selectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	selectedRowStyle = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	titleStyle       = lipgloss.NewStyle().Bold(true)
+	mutedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	runningStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	warningStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	borderStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
-// View renders a compact bordered application surface.
+// View renders a compact surface centered when the terminal has room.
 func (m Model) View() tea.View {
-	innerWidth := max(1, min(76, m.width-4))
-	innerHeight := max(1, m.height-2)
-	m.help.SetWidth(innerWidth)
+	surfaceWidth := max(1, min(104, m.width-4))
+	m.help.SetWidth(surfaceWidth)
 
-	header := titleStyle.Render("hrd")
+	contextName := "Sessions & Sprites"
 	if m.screen == screenSprite {
-		name := "Sprite"
+		contextName = "Sprite"
 		if endpoint, ok := m.spriteEndpoint.Endpoint.(catalog.SpriteEndpoint); ok {
-			name = printable(endpoint.Name)
+			contextName = printable(endpoint.Name)
 		}
-		header += "  " + mutedStyle.Render("/ Sprites / "+name)
-	} else {
-		header += "  " + mutedStyle.Render("/ Sessions & Sprites")
 	}
-
-	footer := m.helpView()
-	footerHeight := lipgloss.Height(footer)
-	lines := []string{clip(header, innerWidth)}
+	lines := []string{titleStyle.Render("hrd") + "  " + mutedStyle.Render("/ "+contextName)}
 	for _, notice := range []string{m.notice, m.createNotice, m.refreshNotice} {
 		if notice == "" {
 			continue
@@ -1337,29 +1373,21 @@ func (m Model) View() tea.View {
 		if strings.Contains(strings.ToLower(notice), "failed") || strings.Contains(strings.ToLower(notice), "couldn’t") {
 			style = errorStyle
 		}
-		lines = append(lines, clip(style.Render("! "+printable(notice)), innerWidth))
+		lines = append(lines, clip(style.Render("! "+printable(notice)), surfaceWidth))
 	}
 
-	bodyBudget := max(1, innerHeight-len(lines)-footerHeight)
-	body := m.bodyView(innerWidth, bodyBudget)
-	if body != "" {
-		lines = append(lines, body)
+	footer := m.helpView()
+	footerHeight := lipgloss.Height(footer)
+	bodyBudget := max(1, m.height-len(lines)-footerHeight-3)
+	if body := m.bodyView(surfaceWidth, bodyBudget); body != "" {
+		lines = append(lines, "", body)
 	}
 	if footer != "" {
-		lines = append(lines, footer)
+		lines = append(lines, "", footer)
 	}
-	content := strings.Join(lines, "\n")
-	panel := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderStyle.GetForeground()).
-		Padding(0, 1).
-		Width(min(80, m.width)).
-		Render(content)
-	panel = fitView(panel, m.width, m.height)
-	if panel != "" {
-		panel += "\n"
-	}
-	view := tea.NewView(panel)
+	surface := fitView(strings.Join(lines, "\n"), surfaceWidth, m.height)
+	content := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, surface)
+	view := tea.NewView(content)
 	view.AltScreen = true
 	view.WindowTitle = "hrd · Herdr sessions"
 	return view
@@ -1462,20 +1490,123 @@ func (m Model) listWithWork(text string, width, height int) string {
 }
 
 func (m Model) listView(width, height int) string {
-	browser := m.browser
-	browser.SetSize(width, max(1, height))
-	return fitView(browser.View(), width, height)
+	filter := ""
+	if m.browser.FilterState() != list.Unfiltered {
+		filter = "Filter  " + m.browser.FilterInput.View()
+	}
+	visible := m.browser.VisibleItems()
+	selected := m.browser.Index()
+	overhead := 2
+	if m.screen == screenEndpoints {
+		overhead = 5
+	}
+	if filter != "" {
+		overhead++
+	}
+	maxRows := max(1, height-overhead)
+	start := 0
+	if len(visible) > maxRows {
+		start = max(0, min(selected-maxRows/2, len(visible)-maxRows))
+	}
+	end := min(len(visible), start+maxRows)
+
+	type indexedItem struct {
+		item  browserItem
+		index int
+	}
+	local := make([]indexedItem, 0)
+	sprites := make([]indexedItem, 0)
+	sessions := make([]indexedItem, 0)
+	for index := start; index < end; index++ {
+		item, ok := visible[index].(browserItem)
+		if !ok {
+			continue
+		}
+		entry := indexedItem{item: item, index: index}
+		switch item.destination.Endpoint.(type) {
+		case catalog.LocalEndpoint:
+			local = append(local, entry)
+		case catalog.SpriteEndpoint:
+			if m.screen == screenSprite {
+				sessions = append(sessions, entry)
+			} else {
+				sprites = append(sprites, entry)
+			}
+		}
+	}
+
+	renderEntries := func(entries []indexedItem) []renderedBrowserItem {
+		rows := make([]renderedBrowserItem, len(entries))
+		for i, entry := range entries {
+			rows[i] = renderedBrowserItem{item: entry.item, selected: entry.index == selected}
+		}
+		return rows
+	}
+	parts := make([]string, 0, 4)
+	if filter != "" {
+		parts = append(parts, clip(filter, width))
+	}
+	if m.screen == screenSprite {
+		badge := "Herdr checked " + age(m.now(), m.spriteSnapshotDetail.observedAt) + " · " + fmt.Sprintf("%d", len(m.spriteSnapshotDetail.rows))
+		parts = append(parts, renderBrowserPanel(m.spriteName()+" sessions", badge, renderEntries(sessions), width, "No Herdr sessions found."))
+	} else {
+		if len(local) > 0 || (m.browser.FilterState() == list.Unfiltered && m.localSnapshot.loaded) {
+			badge := fmt.Sprintf("%d", len(m.localSnapshot.rows))
+			if !m.localSnapshot.current {
+				badge = "refresh failed · checked " + age(m.now(), m.localSnapshot.observedAt)
+			}
+			parts = append(parts, renderBrowserPanel("Local sessions", badge, renderEntries(local), width, "No local sessions."))
+		}
+		if len(sprites) > 0 || (m.browser.FilterState() == list.Unfiltered && m.spriteSnapshot.loaded) {
+			badge := "checked " + age(m.now(), m.spriteSnapshot.observedAt) + " · " + fmt.Sprintf("%d", len(m.spriteSnapshot.rows))
+			if !m.spriteSnapshot.current {
+				badge = "refresh failed · checked " + age(m.now(), m.spriteSnapshot.observedAt)
+			}
+			parts = append(parts, renderBrowserPanel("Sprites", badge, renderEntries(sprites), width, "No Sprites."))
+		}
+	}
+	if start > 0 || end < len(visible) {
+		parts = append(parts, mutedStyle.Render(fmt.Sprintf("Showing %d–%d of %d", start+1, end, len(visible))))
+	}
+	return fitView(strings.Join(parts, "\n\n"), width, height)
+}
+
+type renderedBrowserItem struct {
+	item     browserItem
+	selected bool
+}
+
+func renderBrowserPanel(title, badge string, rows []renderedBrowserItem, width int, empty string) string {
+	width = max(12, width)
+	innerWidth := width - 2
+	titleText := " " + printable(title) + " "
+	badgeText := ""
+	if badge != "" {
+		badgeText = " " + printable(badge) + " "
+	}
+	fill := max(1, innerWidth-lipgloss.Width(titleText)-lipgloss.Width(badgeText)-2)
+	top := borderStyle.Render("╭─") + titleStyle.Render(titleText) + borderStyle.Render(strings.Repeat("─", fill))
+	if badgeText != "" {
+		top += mutedStyle.Render(badgeText)
+	}
+	top += borderStyle.Render("─╮")
+
+	body := make([]string, 0, max(1, len(rows)))
+	if len(rows) == 0 {
+		line := mutedStyle.Render(empty)
+		body = append(body, borderStyle.Render("│")+" "+lipgloss.NewStyle().Width(innerWidth-2).Render(line)+" "+borderStyle.Render("│"))
+	} else {
+		for _, row := range rows {
+			line := renderBrowserRow(row.item, row.selected, innerWidth-2)
+			body = append(body, borderStyle.Render("│")+" "+lipgloss.NewStyle().Width(innerWidth-2).Render(line)+" "+borderStyle.Render("│"))
+		}
+	}
+	bottom := borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯")
+	return strings.Join(append(append([]string{top}, body...), bottom), "\n")
 }
 
 func (m Model) spriteReadyView(width, height int) string {
-	observation := mutedStyle.Render("Herdr checked " + age(m.now(), m.spriteSnapshotDetail.observedAt))
-	if height <= 1 {
-		return clip(observation, width)
-	}
-	if len(m.browser.Items()) == 0 {
-		return fitView(observation+"\nNo Herdr sessions found on this Sprite.", width, height)
-	}
-	return clip(observation, width) + "\n" + m.listView(width, height-1)
+	return m.listView(width, height)
 }
 
 func (m Model) transportView() string {
@@ -1561,7 +1692,8 @@ func (m Model) helpView() string {
 				actions = append(actions, m.keys.stop, m.keys.restart)
 			}
 			navigation := []key.Binding{movement, filtering, m.keys.refresh, m.keys.back, m.keys.quit, m.keys.help}
-			short = append(append([]key.Binding(nil), actions...), navigation...)
+			short = append([]key.Binding{movement}, actions...)
+			short = append(short, filtering, m.keys.refresh, m.keys.help)
 			full = [][]key.Binding{actions, navigation}
 		} else {
 			actions := make([]key.Binding, 0, 2)
@@ -1572,7 +1704,8 @@ func (m Model) helpView() string {
 				actions = append(actions, m.keys.create)
 			}
 			navigation := []key.Binding{movement, filtering, m.keys.refresh, m.keys.quit, m.keys.help}
-			short = append(append([]key.Binding(nil), actions...), navigation...)
+			short = append([]key.Binding{movement}, actions...)
+			short = append(short, filtering, m.keys.refresh, m.keys.help)
 			full = [][]key.Binding{actions, navigation}
 		}
 	default:
@@ -1595,11 +1728,11 @@ func (m Model) spriteName() string {
 }
 
 func (m *Model) resizeComponents() {
-	innerWidth := max(1, min(76, m.width-4))
-	m.browser.SetWidth(innerWidth)
-	m.browser.SetHeight(max(1, m.height-5))
-	m.help.SetWidth(innerWidth)
-	m.nameInput.SetWidth(max(1, min(32, innerWidth)))
+	surfaceWidth := max(1, min(104, m.width-4))
+	m.browser.SetWidth(surfaceWidth)
+	m.browser.SetHeight(max(1, m.height-9))
+	m.help.SetWidth(surfaceWidth)
+	m.nameInput.SetWidth(max(1, min(40, surfaceWidth)))
 }
 
 func closePrepared(prepared catalog.PreparedAttach) {
