@@ -56,27 +56,38 @@ const (
 	workflowConnection
 )
 
-type phase uint8
+type homePhase uint8
 
 const (
-	phaseLoading phase = iota + 1
-	phaseReady
-	phaseNamingSprite
-	phaseCreatingSprite
-	phaseLoadingSprite
-	phaseRefreshingSprite
-	phaseConfirmingSpriteInstall
-	phaseInstallingSpriteHerdr
-	phaseConfirmingStop
-	phaseStopping
-	phaseChoosingSpriteTransport
-	phasePreparing
-	phaseConfirmingHostKey
-	phaseStartingSSHAgent
-	phaseAddingSSHKey
-	phaseChoosingSSHKey
-	phaseAttaching
-	phaseInitialLoadFailed
+	homeLoading homePhase = iota + 1
+	homeReady
+	homeNamingSprite
+	homeCreatingSprite
+	homeInitialLoadFailed
+)
+
+type sessionsPhase uint8
+
+const (
+	sessionsLoading sessionsPhase = iota + 1
+	sessionsReady
+	sessionsRefreshing
+	sessionsConfirmingInstall
+	sessionsInstallingHerdr
+)
+
+type connectionPhase uint8
+
+const (
+	connectionConfirmingStop connectionPhase = iota + 1
+	connectionStopping
+	connectionChoosingTransport
+	connectionPreparing
+	connectionConfirmingHostKey
+	connectionStartingSSHAgent
+	connectionAddingSSHKey
+	connectionChoosingSSHKey
+	connectionAttaching
 )
 
 type sourceSnapshot struct {
@@ -200,7 +211,7 @@ func New(root context.Context, operations Operations) Model {
 		help:        helpModel,
 		nameInput:   name,
 	}
-	m.home.phase = phaseLoading
+	m.home.phase = homeLoading
 	m.initialCmd = m.beginInventory()
 	return m
 }
@@ -218,7 +229,7 @@ func (m Model) showsSprite() bool {
 		return true
 	case workflowConnection:
 		switch m.connection.phase {
-		case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport:
+		case connectionConfirmingStop, connectionStopping, connectionChoosingTransport:
 			_, ok := m.connection.destination.Endpoint.(catalog.SpriteEndpoint)
 			return ok
 		default:
@@ -229,41 +240,39 @@ func (m Model) showsSprite() bool {
 	}
 }
 
-func (m Model) currentPhase() phase {
-	switch m.active {
-	case workflowHome:
-		return m.home.phase
-	case workflowSessions:
-		return m.sessions.phase
-	case workflowConnection:
-		return m.connection.phase
-	default:
-		panic("ui: invalid active workflow")
+func (m *Model) showHome(next homePhase) {
+	m.active = workflowHome
+	m.home.phase = next
+}
+
+func (m *Model) showSessions(next sessionsPhase) {
+	m.active = workflowSessions
+	m.sessions.phase = next
+}
+
+func (m *Model) showConnection(next connectionPhase) {
+	m.active = workflowConnection
+	m.connection.phase = next
+}
+
+func (m *Model) showReady() {
+	if m.showsSprite() {
+		m.showSessions(sessionsReady)
+	} else {
+		m.showHome(homeReady)
 	}
 }
 
-func (m *Model) setPhase(next phase) {
-	switch next {
-	case phaseLoading, phaseInitialLoadFailed, phaseNamingSprite, phaseCreatingSprite:
-		m.active = workflowHome
-		m.home.phase = next
-	case phaseLoadingSprite, phaseConfirmingSpriteInstall, phaseInstallingSpriteHerdr, phaseRefreshingSprite:
-		m.active = workflowSessions
-		m.sessions.phase = next
-	case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport, phasePreparing,
-		phaseConfirmingHostKey, phaseStartingSSHAgent, phaseAddingSSHKey, phaseChoosingSSHKey, phaseAttaching:
-		m.active = workflowConnection
-		m.connection.phase = next
-	case phaseReady:
-		if m.showsSprite() {
-			m.active = workflowSessions
-			m.sessions.phase = next
-		} else {
-			m.active = workflowHome
-			m.home.phase = next
-		}
+func (m Model) ready() bool {
+	switch m.active {
+	case workflowHome:
+		return m.home.phase == homeReady
+	case workflowSessions:
+		return m.sessions.phase == sessionsReady
+	case workflowConnection:
+		return false
 	default:
-		panic("ui: invalid phase")
+		panic("ui: invalid active workflow")
 	}
 }
 
@@ -294,7 +303,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case refreshTick:
 		cmds := make([]tea.Cmd, 0, 2)
-		if m.active == workflowHome && m.currentPhase() == phaseReady && !m.home.inventoryRefreshing {
+		if m.active == workflowHome && m.home.phase == homeReady && !m.home.inventoryRefreshing {
 			cmds = append(cmds, m.beginSilentInventory())
 		}
 		cmds = append(cmds, scheduleRefresh())
@@ -313,7 +322,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	textEditing := m.currentPhase() == phaseNamingSprite || (m.currentPhase() == phaseReady && m.browser.SettingFilter())
+	textEditing := (m.active == workflowHome && m.home.phase == homeNamingSprite) || (m.ready() && m.browser.SettingFilter())
 	if key.Matches(msg, m.keys.force) || (key.Matches(msg, m.keys.quit) && !textEditing) {
 		m.cancelOperation()
 		closePrepared(m.connection.prepared)
@@ -321,7 +330,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	}
-	if m.currentPhase() == phaseReady && key.Matches(msg, m.keys.help) && !m.browser.SettingFilter() {
+	if m.ready() && key.Matches(msg, m.keys.help) && !m.browser.SettingFilter() {
 		m.showHelp = !m.showHelp
 		m.help.ShowAll = m.showHelp
 		return m, nil
@@ -341,7 +350,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) returnToEndpoints() tea.Cmd {
 	m.active = workflowHome
-	m.home.phase = phaseReady
+	m.home.phase = homeReady
 	m.browser.ResetFilter()
 	m.syncEndpointItems(m.home.endpointSelection)
 	if !m.home.spriteSnapshot.loaded || m.home.spriteSnapshot.current {

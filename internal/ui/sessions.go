@@ -10,7 +10,7 @@ import (
 )
 
 type sessionsState struct {
-	phase                   phase
+	phase                   sessionsPhase
 	spriteEndpoint          catalog.Destination
 	spriteEndpointSelection catalog.SpriteEndpointSelection
 	spriteDetailEndpointID  catalog.DestinationID
@@ -61,14 +61,14 @@ func (m Model) updateSessionsMessage(msg sessionsMessage) (tea.Model, tea.Cmd) {
 
 func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.sessions.phase {
-	case phaseConfirmingSpriteInstall:
+	case sessionsConfirmingInstall:
 		return m.updateSpriteInstallConfirmation(msg)
-	case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
+	case sessionsLoading, sessionsRefreshing, sessionsInstallingHerdr:
 		if msg.String() == "esc" {
 			return m, m.returnToEndpoints()
 		}
 		return m, nil
-	case phaseReady:
+	case sessionsReady:
 	default:
 		panic("ui: invalid Sprite Sessions phase")
 	}
@@ -85,7 +85,7 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
 				m.connection.destination = destination
 				m.connection.restart = false
-				m.setPhase(phaseConfirmingStop)
+				m.showConnection(connectionConfirmingStop)
 			}
 			return m, nil
 		}
@@ -93,7 +93,7 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
 				m.connection.destination = destination
 				m.connection.restart = true
-				m.setPhase(phaseConfirmingStop)
+				m.showConnection(connectionConfirmingStop)
 			}
 			return m, nil
 		}
@@ -107,7 +107,7 @@ func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.connection.destination = destination
 			m.connection.restart = false
 			m.connection.transport = catalog.NativePreview
-			m.setPhase(phaseChoosingSpriteTransport)
+			m.showConnection(connectionChoosingTransport)
 			return m, nil
 		}
 	}
@@ -126,15 +126,15 @@ func (m Model) updateSpriteInstallConfirmation(msg tea.KeyPressMsg) (tea.Model, 
 }
 
 func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || msg.endpointID != m.sessions.spriteDetailEndpointID || (m.currentPhase() != phaseLoadingSprite && m.currentPhase() != phaseRefreshingSprite) {
+	if msg.opID != m.operation.id || msg.endpointID != m.sessions.spriteDetailEndpointID || (m.sessions.phase != sessionsLoading && m.sessions.phase != sessionsRefreshing) {
 		return m, nil
 	}
-	initial := m.currentPhase() == phaseLoadingSprite
+	initial := m.sessions.phase == sessionsLoading
 	m.cancelOperation()
 	if errors.Is(msg.err, catalog.ErrSpriteHerdrMissing) {
 		m.sessions.spriteSnapshotDetail = sourceSnapshot{}
 		m.refreshNotice = ""
-		m.setPhase(phaseConfirmingSpriteInstall)
+		m.showSessions(sessionsConfirmingInstall)
 		m.syncSpriteItems("")
 		return m, nil
 	}
@@ -145,7 +145,7 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 		m.sessions.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), msg.rows...), loaded: true, current: true}
 		m.refreshNotice = ""
 	}
-	m.setPhase(phaseReady)
+	m.showSessions(sessionsReady)
 	selected := m.selectedID
 	if initial {
 		selected = ""
@@ -155,16 +155,16 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 }
 
 func (m Model) updateInstallSpriteHerdrDone(msg installSpriteHerdrDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.currentPhase() != phaseInstallingSpriteHerdr {
+	if msg.opID != m.operation.id || m.sessions.phase != sessionsInstallingHerdr {
 		return m, nil
 	}
 	m.cancelOperation()
 	if msg.err != nil {
 		m.notice = "Couldn’t install Herdr: " + printable(msg.err.Error())
-		m.setPhase(phaseReady)
+		m.showSessions(sessionsReady)
 		return m, nil
 	}
-	m.setPhase(phaseLoadingSprite)
+	m.showSessions(sessionsLoading)
 	cmd := m.beginSpriteSessions()
 	return m, tea.Batch(cmd, m.spinner.Tick)
 }
@@ -189,7 +189,7 @@ func (m *Model) beginInstallSpriteHerdr() tea.Cmd {
 		return nil
 	}
 	opID, ctx := m.beginOperation()
-	m.setPhase(phaseInstallingSpriteHerdr)
+	m.showSessions(sessionsInstallingHerdr)
 	selection := m.sessions.spriteEndpointSelection
 	return func() tea.Msg {
 		return installSpriteHerdrDone{opID: opID, err: operations.InstallSpriteHerdr(ctx, selection)}
@@ -197,7 +197,7 @@ func (m *Model) beginInstallSpriteHerdr() tea.Cmd {
 }
 
 func (m *Model) beginSpriteRefresh() tea.Cmd {
-	m.setPhase(phaseRefreshingSprite)
+	m.showSessions(sessionsRefreshing)
 	cmd := m.beginSpriteSessions()
 	return tea.Batch(cmd, m.spinner.Tick)
 }

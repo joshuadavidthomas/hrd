@@ -18,12 +18,15 @@ func (m Model) busy() bool {
 	if m.home.inventoryRefreshing && m.home.inventoryRefreshVisible {
 		return true
 	}
-	switch m.currentPhase() {
-	case phaseCreatingSprite, phaseLoadingSprite, phaseRefreshingSprite,
-		phaseInstallingSpriteHerdr, phaseStopping, phasePreparing, phaseStartingSSHAgent:
-		return true
+	switch m.active {
+	case workflowHome:
+		return m.home.phase == homeCreatingSprite
+	case workflowSessions:
+		return m.sessions.phase == sessionsLoading || m.sessions.phase == sessionsRefreshing || m.sessions.phase == sessionsInstallingHerdr
+	case workflowConnection:
+		return m.connection.phase == connectionStopping || m.connection.phase == connectionPreparing || m.connection.phase == connectionStartingSSHAgent
 	default:
-		return false
+		panic("ui: invalid active workflow")
 	}
 }
 
@@ -40,7 +43,7 @@ var (
 
 // View renders a compact surface centered when the terminal has room.
 func (m Model) View() tea.View {
-	if m.currentPhase() == phaseLoading {
+	if m.active == workflowHome && m.home.phase == homeLoading {
 		view := tea.NewView("")
 		view.AltScreen = true
 		view.WindowTitle = "hrd · Herdr sessions"
@@ -106,14 +109,16 @@ func (m Model) breadcrumbSegments() []string {
 		segments = append(segments, m.spriteName())
 	}
 
-	switch m.currentPhase() {
-	case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport:
-		if m.connection.destination.Label != "" {
-			segments = append(segments, printable(m.connection.destination.Label))
-		}
-	case phasePreparing, phaseConfirmingHostKey, phaseStartingSSHAgent, phaseAddingSSHKey, phaseChoosingSSHKey, phaseAttaching:
-		if m.connection.prepare.destination.Label != "" {
-			segments = append(segments, printable(m.connection.prepare.destination.Label))
+	if m.active == workflowConnection {
+		switch m.connection.phase {
+		case connectionConfirmingStop, connectionStopping, connectionChoosingTransport:
+			if m.connection.destination.Label != "" {
+				segments = append(segments, printable(m.connection.destination.Label))
+			}
+		case connectionPreparing, connectionConfirmingHostKey, connectionStartingSSHAgent, connectionAddingSSHKey, connectionChoosingSSHKey, connectionAttaching:
+			if m.connection.prepare.destination.Label != "" {
+				segments = append(segments, printable(m.connection.prepare.destination.Label))
+			}
 		}
 	}
 	return segments
@@ -134,20 +139,20 @@ func (m Model) bodyView(width, height int) string {
 
 func (m Model) homeView(width, height int) string {
 	switch m.home.phase {
-	case phaseLoading:
+	case homeLoading:
 		return ""
-	case phaseInitialLoadFailed:
+	case homeInitialLoadFailed:
 		return clip("No inventory source loaded. Press r to retry.", width)
-	case phaseNamingSprite:
+	case homeNamingSprite:
 		return fitView(strings.Join([]string{
 			"Name your Sprite",
 			m.nameInput.View(),
 			mutedStyle.Render("1–63 lowercase letters, digits, and interior hyphens"),
 			warningStyle.Render("Creating and waking a Sprite may incur charges."),
 		}, "\n"), width, height)
-	case phaseCreatingSprite:
+	case homeCreatingSprite:
 		return m.busyLine("Creating "+m.nameInput.Value()+"…", width)
-	case phaseReady:
+	case homeReady:
 		if len(m.browser.Items()) == 0 {
 			return "No local sessions or Sprite endpoints found."
 		}
@@ -159,13 +164,13 @@ func (m Model) homeView(width, height int) string {
 
 func (m Model) sessionsView(width, height int) string {
 	switch m.sessions.phase {
-	case phaseLoadingSprite:
+	case sessionsLoading:
 		return m.spriteSessionsLoadingView(width, height)
-	case phaseConfirmingSpriteInstall:
+	case sessionsConfirmingInstall:
 		return titleStyle.Render("Install Herdr?")
-	case phaseInstallingSpriteHerdr:
+	case sessionsInstallingHerdr:
 		return m.busyLine("Installing Herdr…", width)
-	case phaseRefreshingSprite, phaseReady:
+	case sessionsRefreshing, sessionsReady:
 		return m.listView(width, height)
 	default:
 		panic("ui: invalid Sprite Sessions phase")
@@ -174,7 +179,7 @@ func (m Model) sessionsView(width, height int) string {
 
 func (m Model) connectionView(width, height int) string {
 	switch m.connection.phase {
-	case phaseConfirmingStop:
+	case connectionConfirmingStop:
 		action := "Stop"
 		if m.connection.restart {
 			action = "Restart"
@@ -183,15 +188,15 @@ func (m Model) connectionView(width, height int) string {
 			titleStyle.Render(action + " " + printable(m.connection.destination.Label) + "?"),
 			warningStyle.Render("Pane processes in this session will exit."),
 		}, "\n"), width, height)
-	case phaseStopping:
+	case connectionStopping:
 		action := "Stopping "
 		if m.connection.restart {
 			action = "Stopping before restart: "
 		}
 		return m.listWithWork(action+printable(m.connection.destination.Label)+"…", width, height)
-	case phaseChoosingSpriteTransport:
+	case connectionChoosingTransport:
 		return fitView(m.transportView(width), width, height)
-	case phasePreparing:
+	case connectionPreparing:
 		if m.connection.prepare.sprite {
 			if m.connection.prepare.transport == catalog.SSHFallback {
 				return m.busyLine("Setting up SSH on "+m.spriteName()+"… Up to three minutes.", width)
@@ -199,7 +204,7 @@ func (m Model) connectionView(width, height int) string {
 			return fitView(m.transportView(width), width, height)
 		}
 		return m.busyLine("Preparing local session "+printable(m.connection.prepare.destination.Label)+"…", width)
-	case phaseConfirmingHostKey:
+	case connectionConfirmingHostKey:
 		prepared, _ := m.connection.prepared.(catalog.PreparedProcessAttach)
 		return fitView(strings.Join([]string{
 			titleStyle.Render("Verify SSH host key"),
@@ -207,13 +212,13 @@ func (m Model) connectionView(width, height int) string {
 			accentStyle.Render(printable(prepared.Fingerprint)),
 			"Continue only if OpenSSH shows this fingerprint.",
 		}, "\n"), width, height)
-	case phaseStartingSSHAgent:
+	case connectionStartingSSHAgent:
 		return m.busyLine("Starting a private ssh-agent…", width)
-	case phaseAddingSSHKey:
+	case connectionAddingSSHKey:
 		return fitView("ssh-add has the terminal. Complete its prompt to continue.", width, height)
-	case phaseChoosingSSHKey:
+	case connectionChoosingSSHKey:
 		return fitView(m.sshKeyView(width), width, height)
-	case phaseAttaching:
+	case connectionAttaching:
 		if m.connection.prepare.sprite && m.connection.prepare.transport == catalog.NativePreview {
 			return m.listView(width, height)
 		}
@@ -239,7 +244,7 @@ func (m Model) toastView() string {
 	progress := ""
 	if m.home.inventoryRefreshing && m.home.inventoryRefreshVisible {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing local and Sprite inventory…")
-	} else if m.currentPhase() == phaseRefreshingSprite {
+	} else if m.active == workflowSessions && m.sessions.phase == sessionsRefreshing {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing "+m.spriteName()+" sessions…")
 	}
 	messages := append([]string(nil), notices...)
@@ -486,7 +491,7 @@ func (m Model) transportView(width int) string {
 		"",
 		panel,
 	}
-	if m.currentPhase() == phasePreparing && m.connection.transport == catalog.NativePreview {
+	if m.active == workflowConnection && m.connection.phase == connectionPreparing && m.connection.transport == catalog.NativePreview {
 		parts = append(parts, "", m.busyLine("Preparing native connection…", chooserWidth))
 	}
 	content := strings.Join(parts, "\n")
@@ -572,9 +577,9 @@ func (m Model) helpView() string {
 	switch m.active {
 	case workflowHome:
 		switch m.home.phase {
-		case phaseNamingSprite:
+		case homeNamingSprite:
 			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("home"), m.keys.force}
-		case phaseReady:
+		case homeReady:
 			if m.browser.SettingFilter() {
 				short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
 				break
@@ -595,11 +600,11 @@ func (m Model) helpView() string {
 		}
 	case workflowSessions:
 		switch m.sessions.phase {
-		case phaseConfirmingSpriteInstall:
+		case sessionsConfirmingInstall:
 			short = []key.Binding{m.keys.confirm, cancelTo("home"), m.keys.quit}
-		case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
+		case sessionsLoading, sessionsRefreshing, sessionsInstallingHerdr:
 			short = []key.Binding{escapeTo("home"), m.keys.force}
-		case phaseReady:
+		case sessionsReady:
 			if m.browser.SettingFilter() {
 				short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
 				break
@@ -621,20 +626,20 @@ func (m Model) helpView() string {
 		}
 	case workflowConnection:
 		switch m.connection.phase {
-		case phaseChoosingSpriteTransport:
+		case connectionChoosingTransport:
 			short = []key.Binding{
 				key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")),
 				key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "connect")),
 				escapeTo("sessions"),
 				m.keys.quit,
 			}
-		case phasePreparing:
+		case connectionPreparing:
 			short = []key.Binding{m.keys.quit}
-		case phaseConfirmingStop:
+		case connectionConfirmingStop:
 			short = []key.Binding{m.keys.confirm, cancelTo("sessions"), m.keys.quit}
-		case phaseConfirmingHostKey:
+		case connectionConfirmingHostKey:
 			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "continue")), cancelTo("sessions"), m.keys.quit}
-		case phaseChoosingSSHKey:
+		case connectionChoosingSSHKey:
 			short = []key.Binding{key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")), key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "use key")), escapeTo("sessions"), m.keys.quit}
 		default:
 			short = []key.Binding{m.keys.quit}

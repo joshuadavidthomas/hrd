@@ -140,15 +140,15 @@ func (*fakeTerminalCommand) SetStderr(io.Writer) {}
 func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 	ops := &fakeOperations{}
 	model := New(context.Background(), ops)
-	if model.currentPhase() != phaseLoading || model.operation.id != 1 || len(model.browser.Items()) != 0 {
-		t.Fatalf("new model phase/id/items = %v/%d/%d", model.currentPhase(), model.operation.id, len(model.browser.Items()))
+	if model.home.phase != homeLoading || model.operation.id != 1 || len(model.browser.Items()) != 0 {
+		t.Fatalf("new model phase/id/items = %v/%d/%d", model.active, model.operation.id, len(model.browser.Items()))
 	}
 	if view := model.View(); view.Content != "" || !view.AltScreen || view.WindowTitle == "" {
 		t.Fatalf("initial view = content %q alt %v title %q", view.Content, view.AltScreen, view.WindowTitle)
 	}
 	model, cmd := update(t, model, run(t, model.initialCmd))
-	if cmd != nil || model.currentPhase() != phaseReady || len(model.browser.Items()) != 2 || ops.inventoryCalls.Load() != 1 {
-		t.Fatalf("loaded phase/items/calls/cmd = %v/%d/%d/%v", model.currentPhase(), len(model.browser.Items()), ops.inventoryCalls.Load(), cmd)
+	if cmd != nil || !model.ready() || len(model.browser.Items()) != 2 || ops.inventoryCalls.Load() != 1 {
+		t.Fatalf("loaded phase/items/calls/cmd = %v/%d/%d/%v", model.active, len(model.browser.Items()), ops.inventoryCalls.Load(), cmd)
 	}
 	view := model.View()
 	for _, want := range []string{"default", "Local", "running", "alpha", "stopped", "enter", "refresh"} {
@@ -164,22 +164,22 @@ func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 func TestActiveWorkflowOwnsItsPhase(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	model := New(context.Background(), ops)
-	if model.active != workflowHome || model.home.phase != phaseLoading {
+	if model.active != workflowHome || model.home.phase != homeLoading {
 		t.Fatalf("initial workflow/phase = %v/%v", model.active, model.home.phase)
 	}
 	model, _ = update(t, model, run(t, model.initialCmd))
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
-	if model.active != workflowSessions || model.sessions.phase != phaseLoadingSprite {
+	if model.active != workflowSessions || model.sessions.phase != sessionsLoading {
 		t.Fatalf("Sprite workflow/phase = %v/%v", model.active, model.sessions.phase)
 	}
 	model, _ = update(t, model, runFirst(t, load))
 	model, _ = update(t, model, press("enter"))
-	if model.active != workflowConnection || model.connection.phase != phaseChoosingSpriteTransport {
+	if model.active != workflowConnection || model.connection.phase != connectionChoosingTransport {
 		t.Fatalf("connection workflow/phase = %v/%v", model.active, model.connection.phase)
 	}
 	model, _ = update(t, model, press("esc"))
-	if model.active != workflowSessions || model.sessions.phase != phaseReady {
+	if model.active != workflowSessions || model.sessions.phase != sessionsReady {
 		t.Fatalf("return workflow/phase = %v/%v", model.active, model.sessions.phase)
 	}
 }
@@ -380,7 +380,7 @@ func TestShortToastKeepsFailureAheadOfRefreshProgress(t *testing.T) {
 	for height := 1; height <= 4; height++ {
 		model := ready(t, &fakeOperations{})
 		model, _ = update(t, model, tea.WindowSizeMsg{Width: 80, Height: height})
-		model.setPhase(phaseRefreshingSprite)
+		model.showSessions(sessionsRefreshing)
 		model.notice = "Attach failed: socket closed"
 		plain := ansi.Strip(model.View().Content)
 		if !strings.Contains(plain, "Attach failed") {
@@ -405,7 +405,7 @@ func TestPartialSourceFailureRetainsStaleRowsAndDisablesTheirActions(t *testing.
 	model.selectedID = selected(t, model).ID
 	model, refresh := update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.currentPhase() != phaseReady || !model.home.localSnapshot.current || model.home.spriteSnapshot.current {
+	if !model.ready() || !model.home.localSnapshot.current || model.home.spriteSnapshot.current {
 		t.Fatalf("snapshot current flags = local %v Sprite %v", model.home.localSnapshot.current, model.home.spriteSnapshot.current)
 	}
 	if selected(t, model).Label != "devbox" {
@@ -456,13 +456,13 @@ func TestTotalInitialFailureRetriesToReady(t *testing.T) {
 	}
 	model := New(context.Background(), ops)
 	model, _ = update(t, model, run(t, model.initialCmd))
-	if model.currentPhase() != phaseInitialLoadFailed || !strings.Contains(model.View().Content, "local down") || !strings.Contains(model.View().Content, "Sprites down") {
-		t.Fatalf("initial failure = phase %v view %q", model.currentPhase(), model.View().Content)
+	if model.home.phase != homeInitialLoadFailed || !strings.Contains(model.View().Content, "local down") || !strings.Contains(model.View().Content, "Sprites down") {
+		t.Fatalf("initial failure = phase %v view %q", model.active, model.View().Content)
 	}
 	model, retry := update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, retry))
-	if model.currentPhase() != phaseReady || len(model.browser.Items()) != 3 {
-		t.Fatalf("initial retry = phase %v items %d", model.currentPhase(), len(model.browser.Items()))
+	if !model.ready() || len(model.browser.Items()) != 3 {
+		t.Fatalf("initial retry = phase %v items %d", model.active, len(model.browser.Items()))
 	}
 }
 
@@ -523,12 +523,12 @@ func TestNamingSupersedesBackgroundRefresh(t *testing.T) {
 
 	model, _ = update(t, model, press("n"))
 	model, _ = update(t, model, press("x"))
-	if model.currentPhase() != phaseNamingSprite || model.nameInput.Value() != "x" || model.home.inventoryRefreshing || model.operation.id <= refreshID {
-		t.Fatalf("naming did not supersede refresh = phase %v value %q refreshing %v id %d→%d", model.currentPhase(), model.nameInput.Value(), model.home.inventoryRefreshing, refreshID, model.operation.id)
+	if model.home.phase != homeNamingSprite || model.nameInput.Value() != "x" || model.home.inventoryRefreshing || model.operation.id <= refreshID {
+		t.Fatalf("naming did not supersede refresh = phase %v value %q refreshing %v id %d→%d", model.active, model.nameInput.Value(), model.home.inventoryRefreshing, refreshID, model.operation.id)
 	}
 	model, cmd := update(t, model, inventoryDone{opID: refreshID, inventory: catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Cold)}}})
-	if cmd != nil || model.currentPhase() != phaseNamingSprite || model.nameInput.Value() != "x" {
-		t.Fatalf("late background refresh closed naming: phase %v value %q cmd %v", model.currentPhase(), model.nameInput.Value(), cmd)
+	if cmd != nil || model.home.phase != homeNamingSprite || model.nameInput.Value() != "x" {
+		t.Fatalf("late background refresh closed naming: phase %v value %q cmd %v", model.active, model.nameInput.Value(), cmd)
 	}
 }
 
@@ -587,8 +587,8 @@ func TestInventoryRefreshKeepsReadyInteractionsAndCancelsOnNewEffect(t *testing.
 	}
 	model := ready(t, ops)
 	model, refresh := update(t, model, press("r"))
-	if model.currentPhase() != phaseReady || !model.home.inventoryRefreshing || !strings.Contains(model.View().Content, "Refreshing local") {
-		t.Fatalf("refresh blocked view = phase %v refreshing %v view %q", model.currentPhase(), model.home.inventoryRefreshing, model.View().Content)
+	if !model.ready() || !model.home.inventoryRefreshing || !strings.Contains(model.View().Content, "Refreshing local") {
+		t.Fatalf("refresh blocked view = phase %v refreshing %v view %q", model.active, model.home.inventoryRefreshing, model.View().Content)
 	}
 	model, _ = update(t, model, press("down"))
 	if selected(t, model).Label != "alpha" {
@@ -602,13 +602,13 @@ func TestInventoryRefreshKeepsReadyInteractionsAndCancelsOnNewEffect(t *testing.
 		t.Fatal("refresh did not start")
 	}
 	model, prepare := update(t, model, press("enter"))
-	if model.currentPhase() != phasePreparing || model.home.inventoryRefreshing || prepare == nil {
-		t.Fatalf("new effect did not supersede refresh = phase %v refreshing %v cmd %v", model.currentPhase(), model.home.inventoryRefreshing, prepare)
+	if model.connection.phase != connectionPreparing || model.home.inventoryRefreshing || prepare == nil {
+		t.Fatalf("new effect did not supersede refresh = phase %v refreshing %v cmd %v", model.active, model.home.inventoryRefreshing, prepare)
 	}
 	select {
 	case completion := <-done:
 		model, stale := update(t, model, completion)
-		if stale != nil || model.currentPhase() != phasePreparing {
+		if stale != nil || model.connection.phase != connectionPreparing {
 			t.Fatal("canceled refresh completion changed active effect")
 		}
 	case <-time.After(time.Second):
@@ -653,8 +653,8 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 	model := ready(t, ops)
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
-	if model.active != workflowSessions || model.currentPhase() != phaseLoadingSprite || load == nil || ops.listSpriteCalls.Load() != 0 {
-		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.currentPhase(), model.active, ops.listSpriteCalls.Load(), load)
+	if model.active != workflowSessions || model.sessions.phase != sessionsLoading || load == nil || ops.listSpriteCalls.Load() != 0 {
+		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.active, model.active, ops.listSpriteCalls.Load(), load)
 	}
 	loadingView := ansi.Strip(model.View().Content)
 	for _, want := range []string{"devbox sessions", "Loading sessions", ansi.Strip(model.spinner.View())} {
@@ -668,8 +668,8 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 		}
 	}
 	model, _ = update(t, model, runFirst(t, load))
-	if model.currentPhase() != phaseReady || len(model.browser.Items()) != 2 || ops.listSpriteCalls.Load() != 1 || ops.prepareSpriteCalls.Load() != 0 {
-		t.Fatalf("detail state/items/list/prepare = %v/%d/%d/%d", model.currentPhase(), len(model.browser.Items()), ops.listSpriteCalls.Load(), ops.prepareSpriteCalls.Load())
+	if !model.ready() || len(model.browser.Items()) != 2 || ops.listSpriteCalls.Load() != 1 || ops.prepareSpriteCalls.Load() != 0 {
+		t.Fatalf("detail state/items/list/prepare = %v/%d/%d/%d", model.active, len(model.browser.Items()), ops.listSpriteCalls.Load(), ops.prepareSpriteCalls.Load())
 	}
 	for _, want := range []string{"default", "running", "work", "stopped"} {
 		if !strings.Contains(model.View().Content, want) {
@@ -690,8 +690,8 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
 	model, _ = update(t, model, runFirst(t, load))
-	if model.currentPhase() != phaseConfirmingSpriteInstall || ops.installCalls.Load() != 0 {
-		t.Fatalf("missing Herdr phase/install calls = %v/%d", model.currentPhase(), ops.installCalls.Load())
+	if model.sessions.phase != sessionsConfirmingInstall || ops.installCalls.Load() != 0 {
+		t.Fatalf("missing Herdr phase/install calls = %v/%d", model.active, ops.installCalls.Load())
 	}
 	confirmation := ansi.Strip(model.bodyView(model.surfaceWidth(), model.height))
 	if !strings.Contains(confirmation, "Install Herdr?") {
@@ -703,8 +703,8 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 		}
 	}
 	model, cmd := update(t, model, press("n"))
-	if cmd == nil || model.active != workflowHome || model.currentPhase() != phaseReady || ops.installCalls.Load() != 0 {
-		t.Fatalf("install rejection = screen %v phase %v calls %d cmd %v", model.active, model.currentPhase(), ops.installCalls.Load(), cmd)
+	if cmd == nil || model.active != workflowHome || !model.ready() || ops.installCalls.Load() != 0 {
+		t.Fatalf("install rejection = screen %v phase %v calls %d cmd %v", model.active, model.active, ops.installCalls.Load(), cmd)
 	}
 	model, _ = update(t, model, runFirst(t, cmd))
 
@@ -715,8 +715,8 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 	}
 	model, _ = update(t, model, runFirst(t, load))
 	model, install := update(t, model, press("y"))
-	if model.currentPhase() != phaseInstallingSpriteHerdr || install == nil || ops.installCalls.Load() != 0 {
-		t.Fatalf("install start = phase %v calls %d cmd %v", model.currentPhase(), ops.installCalls.Load(), install)
+	if model.sessions.phase != sessionsInstallingHerdr || install == nil || ops.installCalls.Load() != 0 {
+		t.Fatalf("install start = phase %v calls %d cmd %v", model.active, ops.installCalls.Load(), install)
 	}
 	progress := ansi.Strip(model.bodyView(model.surfaceWidth(), model.height))
 	if !strings.Contains(progress, "Installing Herdr…") || strings.Contains(progress, "devbox") || strings.Contains(progress, "three minutes") {
@@ -726,12 +726,12 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 		return spriteSessionRows("devbox", sprites.Running), nil
 	}
 	model, relist := update(t, model, runFirst(t, install))
-	if model.currentPhase() != phaseLoadingSprite || relist == nil || ops.installCalls.Load() != 1 {
-		t.Fatalf("install completion = phase %v calls %d cmd %v", model.currentPhase(), ops.installCalls.Load(), relist)
+	if model.sessions.phase != sessionsLoading || relist == nil || ops.installCalls.Load() != 1 {
+		t.Fatalf("install completion = phase %v calls %d cmd %v", model.active, ops.installCalls.Load(), relist)
 	}
 	model, _ = update(t, model, runFirst(t, relist))
-	if model.currentPhase() != phaseReady || len(model.browser.Items()) != 2 {
-		t.Fatalf("post-install list = phase %v items %d", model.currentPhase(), len(model.browser.Items()))
+	if !model.ready() || len(model.browser.Items()) != 2 {
+		t.Fatalf("post-install list = phase %v items %d", model.active, len(model.browser.Items()))
 	}
 }
 
@@ -763,7 +763,7 @@ func TestSpriteDetailSnapshotIsResetAcrossEndpoints(t *testing.T) {
 		t.Fatal("beta load exposed alpha snapshot")
 	}
 	model, _ = update(t, model, runFirst(t, load))
-	if model.currentPhase() != phaseReady || len(model.browser.Items()) != 0 || strings.Contains(model.View().Content, "default") {
+	if !model.ready() || len(model.browser.Items()) != 0 || strings.Contains(model.View().Content, "default") {
 		t.Fatalf("failed beta detail leaked alpha rows: %q", model.View().Content)
 	}
 }
@@ -923,8 +923,8 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 				return func() tea.Msg { return callback(nil) }
 			}
 			model, prepare := update(t, model, press("enter"))
-			if model.currentPhase() != phasePreparing || prepare == nil {
-				t.Fatalf("prepare phase/cmd = %v/%v", model.currentPhase(), prepare)
+			if model.connection.phase != connectionPreparing || prepare == nil {
+				t.Fatalf("prepare phase/cmd = %v/%v", model.active, prepare)
 			}
 			if tc.transport == catalog.NativePreview {
 				view := ansi.Strip(model.View().Content)
@@ -933,8 +933,8 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 				}
 			}
 			model, handoff := update(t, model, runFirst(t, prepare))
-			if model.currentPhase() != phaseAttaching || handoff == nil {
-				t.Fatalf("handoff phase/cmd = %v/%v", model.currentPhase(), handoff)
+			if model.connection.phase != connectionAttaching || handoff == nil {
+				t.Fatalf("handoff phase/cmd = %v/%v", model.active, handoff)
 			}
 			if model.home.spriteSnapshot.current || model.sessions.spriteSnapshotDetail.current {
 				t.Fatalf("attach retained current observations = endpoint %v sessions %v", model.home.spriteSnapshot.current, model.sessions.spriteSnapshotDetail.current)
@@ -1006,16 +1006,16 @@ func TestStopErrorInvalidatesUntilSpriteRefreshReconciles(t *testing.T) {
 	model, _ = update(t, model, press("s"))
 	model, stop := update(t, model, press("y"))
 	model, refresh := update(t, model, runFirst(t, stop))
-	if model.currentPhase() != phaseRefreshingSprite || model.sessions.spriteSnapshotDetail.current || refresh == nil {
-		t.Fatalf("stop error state = phase %v current %v cmd %v", model.currentPhase(), model.sessions.spriteSnapshotDetail.current, refresh)
+	if model.sessions.phase != sessionsRefreshing || model.sessions.spriteSnapshotDetail.current || refresh == nil {
+		t.Fatalf("stop error state = phase %v current %v cmd %v", model.active, model.sessions.spriteSnapshotDetail.current, refresh)
 	}
 	if !strings.Contains(model.notice, "stop response lost") || strings.Contains(model.helpView(), "stop") || strings.Contains(model.helpView(), "restart") {
 		t.Fatalf("stop error notice/help = %q/%q", model.notice, model.helpView())
 	}
 
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.currentPhase() != phaseReady || !model.sessions.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "stop response lost") {
-		t.Fatalf("reconciled stop error = phase %v current %v view %q", model.currentPhase(), model.sessions.spriteSnapshotDetail.current, model.View().Content)
+	if !model.ready() || !model.sessions.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "stop response lost") {
+		t.Fatalf("reconciled stop error = phase %v current %v view %q", model.active, model.sessions.spriteSnapshotDetail.current, model.View().Content)
 	}
 }
 
@@ -1023,26 +1023,26 @@ func TestStopConfirmationAndRestartComposeStopThenAttach(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	model := spriteReady(t, ops)
 	model, cmd := update(t, model, press("s"))
-	if cmd != nil || model.currentPhase() != phaseConfirmingStop || model.connection.restart {
-		t.Fatalf("stop confirmation = phase %v restart %v cmd %v", model.currentPhase(), model.connection.restart, cmd)
+	if cmd != nil || model.connection.phase != connectionConfirmingStop || model.connection.restart {
+		t.Fatalf("stop confirmation = phase %v restart %v cmd %v", model.active, model.connection.restart, cmd)
 	}
 	if !strings.Contains(model.View().Content, "Pane processes in this session will exit") {
 		t.Fatalf("confirmation lacks process warning: %q", model.View().Content)
 	}
 	model, _ = update(t, model, press("n"))
-	if model.currentPhase() != phaseReady || ops.stopCalls.Load() != 0 {
+	if !model.ready() || ops.stopCalls.Load() != 0 {
 		t.Fatal("cancel stopped the session")
 	}
 
 	model, _ = update(t, model, press("R"))
 	model, stop := update(t, model, press("y"))
-	if stop != nil || model.currentPhase() != phaseChoosingSpriteTransport || ops.stopCalls.Load() != 0 {
-		t.Fatalf("restart transport choice = calls %d phase %v cmd %v", ops.stopCalls.Load(), model.currentPhase(), stop)
+	if stop != nil || model.connection.phase != connectionChoosingTransport || ops.stopCalls.Load() != 0 {
+		t.Fatalf("restart transport choice = calls %d phase %v cmd %v", ops.stopCalls.Load(), model.active, stop)
 	}
 	model, stop = update(t, model, press("enter"))
 	model, follow := update(t, model, runFirst(t, stop))
-	if follow == nil || ops.stopCalls.Load() != 1 || model.currentPhase() != phasePreparing || model.sessions.spriteSnapshotDetail.current {
-		t.Fatalf("restart composition = calls %d phase %v current %v cmd %v", ops.stopCalls.Load(), model.currentPhase(), model.sessions.spriteSnapshotDetail.current, follow)
+	if follow == nil || ops.stopCalls.Load() != 1 || model.connection.phase != connectionPreparing || model.sessions.spriteSnapshotDetail.current {
+		t.Fatalf("restart composition = calls %d phase %v current %v cmd %v", ops.stopCalls.Load(), model.active, model.sessions.spriteSnapshotDetail.current, follow)
 	}
 }
 
@@ -1055,24 +1055,24 @@ func TestRestartTransportCancelDoesNotStopAndPrepareFailureRefreshesWithNotice(t
 	model, _ = update(t, model, press("R"))
 	model, _ = update(t, model, press("y"))
 	model, cmd := update(t, model, press("esc"))
-	if cmd != nil || model.currentPhase() != phaseReady || ops.stopCalls.Load() != 0 {
-		t.Fatalf("transport cancel = phase %v stops %d cmd %v", model.currentPhase(), ops.stopCalls.Load(), cmd)
+	if cmd != nil || !model.ready() || ops.stopCalls.Load() != 0 {
+		t.Fatalf("transport cancel = phase %v stops %d cmd %v", model.active, ops.stopCalls.Load(), cmd)
 	}
 
 	model, _ = update(t, model, press("R"))
 	model, _ = update(t, model, press("y"))
 	model, stop := update(t, model, press("enter"))
 	model, prepare := update(t, model, runFirst(t, stop))
-	if model.sessions.spriteSnapshotDetail.current || model.currentPhase() != phasePreparing || prepare == nil {
-		t.Fatalf("post-stop invalidation = current %v phase %v cmd %v", model.sessions.spriteSnapshotDetail.current, model.currentPhase(), prepare)
+	if model.sessions.spriteSnapshotDetail.current || model.connection.phase != connectionPreparing || prepare == nil {
+		t.Fatalf("post-stop invalidation = current %v phase %v cmd %v", model.sessions.spriteSnapshotDetail.current, model.active, prepare)
 	}
 	model, refresh := update(t, model, runFirst(t, prepare))
-	if model.currentPhase() != phaseRefreshingSprite || refresh == nil || !strings.Contains(model.notice, "native setup failed") {
-		t.Fatalf("prepare failure refresh = phase %v notice %q cmd %v", model.currentPhase(), model.notice, refresh)
+	if model.sessions.phase != sessionsRefreshing || refresh == nil || !strings.Contains(model.notice, "native setup failed") {
+		t.Fatalf("prepare failure refresh = phase %v notice %q cmd %v", model.active, model.notice, refresh)
 	}
 	model, _ = update(t, model, runFirst(t, refresh))
-	if model.currentPhase() != phaseReady || !model.sessions.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "native setup failed") {
-		t.Fatalf("post-failure refresh = phase %v current %v view %q", model.currentPhase(), model.sessions.spriteSnapshotDetail.current, model.View().Content)
+	if !model.ready() || !model.sessions.spriteSnapshotDetail.current || !strings.Contains(model.View().Content, "native setup failed") {
+		t.Fatalf("post-failure refresh = phase %v current %v view %q", model.active, model.sessions.spriteSnapshotDetail.current, model.View().Content)
 	}
 }
 
@@ -1112,8 +1112,8 @@ func TestAttachFailureNoticeSurvivesAutomaticRefresh(t *testing.T) {
 			model, prepare := update(t, model, press("enter"))
 			model, attach := update(t, model, runFirst(t, prepare))
 			model, refresh := update(t, model, run(t, attach))
-			if model.currentPhase() != phaseRefreshingSprite || refresh == nil || !strings.Contains(model.notice, "control failureunsafe") {
-				t.Fatalf("attach failure = phase %v notice %q cmd %v", model.currentPhase(), model.notice, refresh)
+			if model.sessions.phase != sessionsRefreshing || refresh == nil || !strings.Contains(model.notice, "control failureunsafe") {
+				t.Fatalf("attach failure = phase %v notice %q cmd %v", model.active, model.notice, refresh)
 			}
 			model, _ = update(t, model, runFirst(t, refresh))
 			if !strings.Contains(model.View().Content, "control failureunsafe") {
@@ -1130,8 +1130,8 @@ func TestBackgroundInventoryRefreshDoesNotPollSpriteDetail(t *testing.T) {
 	sessionCalls := ops.listSpriteCalls.Load()
 
 	model, cmd := update(t, model, refreshTick(time.Now()))
-	if cmd == nil || model.currentPhase() != phaseReady || model.home.inventoryRefreshing || ops.inventoryCalls.Load() != inventoryCalls || ops.listSpriteCalls.Load() != sessionCalls {
-		t.Fatalf("detail refresh tick polled = phase %v refreshing %v inventory %d→%d sessions %d→%d cmd %v", model.currentPhase(), model.home.inventoryRefreshing, inventoryCalls, ops.inventoryCalls.Load(), sessionCalls, ops.listSpriteCalls.Load(), cmd)
+	if cmd == nil || !model.ready() || model.home.inventoryRefreshing || ops.inventoryCalls.Load() != inventoryCalls || ops.listSpriteCalls.Load() != sessionCalls {
+		t.Fatalf("detail refresh tick polled = phase %v refreshing %v inventory %d→%d sessions %d→%d cmd %v", model.active, model.home.inventoryRefreshing, inventoryCalls, ops.inventoryCalls.Load(), sessionCalls, ops.listSpriteCalls.Load(), cmd)
 	}
 	content := ansi.Strip(model.View().Content)
 	if strings.Contains(content, "checked") || strings.Contains(content, "ago") {
@@ -1172,7 +1172,7 @@ func TestBrowserLayoutUsesCompactSpacingAndConditionalPagination(t *testing.T) {
 
 func TestSpinnerProgressesAcrossBusyState(t *testing.T) {
 	model := New(context.Background(), &fakeOperations{})
-	model.setPhase(phaseCreatingSprite)
+	model.showHome(homeCreatingSprite)
 	model.nameInput.SetValue("new-sprite")
 	before := model.spinner.View()
 	model, cmd := update(t, model, model.spinner.Tick())
@@ -1196,8 +1196,8 @@ func TestHelpOnlyShowsSelectionCapabilities(t *testing.T) {
 	if help := model.helpView(); strings.Contains(help, "enter") || strings.Contains(help, "restart") || strings.Contains(help, "stop") {
 		t.Fatalf("stale-session help exposes actions = %q", help)
 	}
-	for _, phase := range []phase{phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr} {
-		model.setPhase(phase)
+	for _, phase := range []sessionsPhase{sessionsLoading, sessionsRefreshing, sessionsInstallingHerdr} {
+		model.showSessions(phase)
 		if help := model.helpView(); !strings.Contains(help, "esc") || !strings.Contains(help, "home") {
 			t.Errorf("phase %v help = %q", phase, help)
 		}
@@ -1216,12 +1216,12 @@ func TestHostKeyRequiresExplicitConfirmationAndCancelDropsPrepared(t *testing.T)
 	model.execProcess = func(*exec.Cmd, tea.ExecCallback) tea.Cmd { execCalls++; return nil }
 	model, prepare := update(t, model, press("enter"))
 	model, cmd := update(t, model, runFirst(t, prepare))
-	if cmd != nil || model.currentPhase() != phaseConfirmingHostKey || execCalls != 0 || !strings.Contains(model.View().Content, "SHA256:verified") {
-		t.Fatalf("host confirmation = phase %v calls %d cmd %v view %q", model.currentPhase(), execCalls, cmd, model.View().Content)
+	if cmd != nil || model.connection.phase != connectionConfirmingHostKey || execCalls != 0 || !strings.Contains(model.View().Content, "SHA256:verified") {
+		t.Fatalf("host confirmation = phase %v calls %d cmd %v view %q", model.active, execCalls, cmd, model.View().Content)
 	}
 	model, refresh := update(t, model, press("esc"))
-	if model.connection.prepared != nil || model.currentPhase() != phaseRefreshingSprite || refresh == nil {
-		t.Fatalf("cancel cleanup = prepared %v phase %v cmd %v", model.connection.prepared, model.currentPhase(), refresh)
+	if model.connection.prepared != nil || model.sessions.phase != sessionsRefreshing || refresh == nil {
+		t.Fatalf("cancel cleanup = prepared %v phase %v cmd %v", model.connection.prepared, model.active, refresh)
 	}
 }
 
@@ -1240,13 +1240,13 @@ func TestSSHKeySelectionUsesExactlyOneKeyAndRetries(t *testing.T) {
 	model, _ = update(t, model, press("down"))
 	model, prepare := update(t, model, press("enter"))
 	model, _ = update(t, model, runFirst(t, prepare))
-	if model.currentPhase() != phaseChoosingSSHKey || !strings.Contains(model.View().Content, "Choose exactly one") {
-		t.Fatalf("SSH selection phase/view = %v/%q", model.currentPhase(), model.View().Content)
+	if model.connection.phase != connectionChoosingSSHKey || !strings.Contains(model.View().Content, "Choose exactly one") {
+		t.Fatalf("SSH selection phase/view = %v/%q", model.active, model.View().Content)
 	}
 	model, _ = update(t, model, press("down"))
 	model, retry := update(t, model, press("enter"))
-	if ops.selected != "SHA256:personal" || model.currentPhase() != phasePreparing || retry == nil {
-		t.Fatalf("key selection/retry = %q/%v/%v", ops.selected, model.currentPhase(), retry)
+	if ops.selected != "SHA256:personal" || model.connection.phase != connectionPreparing || retry == nil {
+		t.Fatalf("key selection/retry = %q/%v/%v", ops.selected, model.active, retry)
 	}
 }
 
@@ -1262,8 +1262,8 @@ func TestSSHAddRecoveryRunsOnce(t *testing.T) {
 	model, _ = update(t, model, press("down"))
 	model, prepare := update(t, model, press("enter"))
 	model, start := update(t, model, runFirst(t, prepare))
-	if model.currentPhase() != phaseStartingSSHAgent || start == nil || !model.connection.sshRecoveryTried {
-		t.Fatalf("recovery start = phase %v cmd %v tried %v", model.currentPhase(), start, model.connection.sshRecoveryTried)
+	if model.connection.phase != connectionStartingSSHAgent || start == nil || !model.connection.sshRecoveryTried {
+		t.Fatalf("recovery start = phase %v cmd %v tried %v", model.active, start, model.connection.sshRecoveryTried)
 	}
 	model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {
 		if !reflect.DeepEqual(command.Args, []string{"ssh-add"}) {
@@ -1273,12 +1273,12 @@ func TestSSHAddRecoveryRunsOnce(t *testing.T) {
 	}
 	model, add := update(t, model, run(t, start))
 	model, retry := update(t, model, run(t, add))
-	if retry == nil || model.currentPhase() != phasePreparing || ops.addCalls.Load() != 1 || base.prepareSpriteCalls.Load() != 1 {
-		t.Fatalf("ssh-add retry = phase %v add %d prepare %d cmd %v", model.currentPhase(), ops.addCalls.Load(), base.prepareSpriteCalls.Load(), retry)
+	if retry == nil || model.connection.phase != connectionPreparing || ops.addCalls.Load() != 1 || base.prepareSpriteCalls.Load() != 1 {
+		t.Fatalf("ssh-add retry = phase %v add %d prepare %d cmd %v", model.active, ops.addCalls.Load(), base.prepareSpriteCalls.Load(), retry)
 	}
 	model, noSecondRecovery := update(t, model, runFirst(t, retry))
-	if noSecondRecovery != nil || model.currentPhase() != phaseReady || ops.addCalls.Load() != 1 || base.prepareSpriteCalls.Load() != 2 {
-		t.Fatalf("second failure = phase %v add %d prepare %d cmd %v", model.currentPhase(), ops.addCalls.Load(), base.prepareSpriteCalls.Load(), noSecondRecovery)
+	if noSecondRecovery != nil || !model.ready() || ops.addCalls.Load() != 1 || base.prepareSpriteCalls.Load() != 2 {
+		t.Fatalf("second failure = phase %v add %d prepare %d cmd %v", model.active, ops.addCalls.Load(), base.prepareSpriteCalls.Load(), noSecondRecovery)
 	}
 }
 
@@ -1315,8 +1315,8 @@ func TestConfirmedAndRejectedCreateOutcomes(t *testing.T) {
 		model.nameInput.SetValue("newbox")
 		model, create := update(t, model, press("enter"))
 		model, _ = update(t, model, runFirst(t, create))
-		if model.currentPhase() != phaseNamingSprite || !model.nameInput.Focused() || !strings.Contains(model.View().Content, "name refused") || model.home.inventoryRefreshing {
-			t.Fatalf("rejected create = phase %v focused %v refreshing %v view %q", model.currentPhase(), model.nameInput.Focused(), model.home.inventoryRefreshing, model.View().Content)
+		if model.home.phase != homeNamingSprite || !model.nameInput.Focused() || !strings.Contains(model.View().Content, "name refused") || model.home.inventoryRefreshing {
+			t.Fatalf("rejected create = phase %v focused %v refreshing %v view %q", model.active, model.nameInput.Focused(), model.home.inventoryRefreshing, model.View().Content)
 		}
 	})
 }
@@ -1342,15 +1342,15 @@ func TestUnknownCreateOutcomeBlocksFurtherCreationUntilInventoryReconciles(t *te
 	model.nameInput.SetValue("newbox")
 	model, create := update(t, model, press("enter"))
 	model, refresh := update(t, model, runFirst(t, create))
-	if model.home.createBlock != "newbox" || model.currentPhase() != phaseReady || !model.home.inventoryRefreshing || model.home.inventoryRefreshVisible || refresh == nil {
-		t.Fatalf("unknown outcome block/phase/refreshing/visible/cmd = %q/%v/%v/%v/%v", model.home.createBlock, model.currentPhase(), model.home.inventoryRefreshing, model.home.inventoryRefreshVisible, refresh)
+	if model.home.createBlock != "newbox" || !model.ready() || !model.home.inventoryRefreshing || model.home.inventoryRefreshVisible || refresh == nil {
+		t.Fatalf("unknown outcome block/phase/refreshing/visible/cmd = %q/%v/%v/%v/%v", model.home.createBlock, model.active, model.home.inventoryRefreshing, model.home.inventoryRefreshVisible, refresh)
 	}
 	model, _ = update(t, model, runFirst(t, refresh))
 	if !strings.Contains(model.View().Content, "outcome is unknown") || !strings.Contains(model.View().Content, "refresh failed") || strings.Contains(model.View().Content, "cannot reconcile") {
 		t.Fatalf("silent reconciliation feedback = %q", model.View().Content)
 	}
 	model, cmd := update(t, model, press("n"))
-	if cmd != nil || model.currentPhase() != phaseReady || ops.createCalls.Load() != 1 {
+	if cmd != nil || !model.ready() || ops.createCalls.Load() != 1 {
 		t.Fatal("unknown creation outcome allowed another create")
 	}
 	model, refresh = update(t, model, press("r"))
@@ -1425,8 +1425,8 @@ func ready(t *testing.T, operations Operations) Model {
 	t.Helper()
 	model := New(context.Background(), operations)
 	model, _ = update(t, model, run(t, model.initialCmd))
-	if model.currentPhase() != phaseReady {
-		t.Fatalf("initial load phase = %v, notice %q", model.currentPhase(), model.notice)
+	if !model.ready() {
+		t.Fatalf("initial load phase = %v, notice %q", model.active, model.notice)
 	}
 	return model
 }
@@ -1437,8 +1437,8 @@ func spriteReady(t *testing.T, operations Operations) Model {
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
 	model, _ = update(t, model, runFirst(t, load))
-	if model.active != workflowSessions || model.currentPhase() != phaseReady {
-		t.Fatalf("Sprite detail phase/screen = %v/%v", model.currentPhase(), model.active)
+	if model.active != workflowSessions || !model.ready() {
+		t.Fatalf("Sprite detail phase/screen = %v/%v", model.active, model.active)
 	}
 	return model
 }

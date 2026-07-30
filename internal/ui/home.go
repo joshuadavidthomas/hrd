@@ -12,7 +12,7 @@ import (
 )
 
 type homeState struct {
-	phase                   phase
+	phase                   homePhase
 	localSnapshot           sourceSnapshot
 	spriteSnapshot          sourceSnapshot
 	destinations            []catalog.Destination
@@ -66,18 +66,18 @@ func (m Model) updateHomeMessage(msg homeMessage) (tea.Model, tea.Cmd) {
 
 func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.home.phase {
-	case phaseNamingSprite:
+	case homeNamingSprite:
 		return m.updateName(msg)
-	case phaseInitialLoadFailed:
+	case homeInitialLoadFailed:
 		if key.Matches(msg, m.keys.refresh) {
-			m.setPhase(phaseLoading)
+			m.showHome(homeLoading)
 			m.refreshNotice = ""
 			return m, m.beginInventory()
 		}
 		return m, nil
-	case phaseLoading, phaseCreatingSprite:
+	case homeLoading, homeCreatingSprite:
 		return m, nil
-	case phaseReady:
+	case homeReady:
 	default:
 		panic("ui: invalid Home phase")
 	}
@@ -97,7 +97,7 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.nameInput.SetValue("")
 			m.nameInput.Focus()
 			m.notice = ""
-			m.setPhase(phaseNamingSprite)
+			m.showHome(homeNamingSprite)
 		}
 		return m, nil
 	}
@@ -117,7 +117,7 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.sessions.open(destination, selection)
 			m.home.invalidateSprites()
-			m.setPhase(phaseLoadingSprite)
+			m.showSessions(sessionsLoading)
 			m.browser.ResetFilter()
 			m.browser.SetItems(nil)
 			return m, tea.Batch(m.beginSpriteSessions(), m.spinner.Tick)
@@ -131,7 +131,7 @@ func (m Model) updateName(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.nameInput.Blur()
-		m.setPhase(phaseReady)
+		m.showHome(homeReady)
 		return m, nil
 	case "enter":
 		name := m.nameInput.Value()
@@ -149,10 +149,10 @@ func (m Model) updateName(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || (m.currentPhase() != phaseLoading && !m.home.inventoryRefreshing) {
+	if msg.opID != m.operation.id || (m.home.phase != homeLoading && !m.home.inventoryRefreshing) {
 		return m, nil
 	}
-	wasInitial := m.currentPhase() == phaseLoading
+	wasInitial := m.home.phase == homeLoading
 	showFeedback := wasInitial || m.home.inventoryRefreshVisible
 	m.cancelOperation()
 	m.home.inventoryRefreshing = false
@@ -164,14 +164,14 @@ func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
 		m.refreshNotice = inventoryNotice(msg.inventory, wasInitial)
 	}
 	if wasInitial && !m.home.localSnapshot.loaded && !m.home.spriteSnapshot.loaded {
-		m.setPhase(phaseInitialLoadFailed)
+		m.showHome(homeInitialLoadFailed)
 		if m.refreshNotice == "" {
 			m.refreshNotice = "No inventory source loaded."
 		}
 		return m, nil
 	}
 	m.reconcileCreateBlock()
-	m.setPhase(phaseReady)
+	m.showHome(homeReady)
 	selected := m.selectedID
 	if m.home.selectSprite != "" {
 		for _, row := range m.home.destinations {
@@ -213,18 +213,18 @@ func inventoryNotice(inventory catalog.Inventory, initial bool) string {
 }
 
 func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.currentPhase() != phaseCreatingSprite {
+	if msg.opID != m.operation.id || m.home.phase != homeCreatingSprite {
 		return m, nil
 	}
 	m.cancelOperation()
 	result := msg.result
 	if result.Confirmed && spriteapi.ValidName(result.Name) == nil {
 		m.home.selectSprite = result.Name
-		m.setPhase(phaseReady)
+		m.showHome(homeReady)
 		return m, m.beginSilentInventory()
 	}
 	if result.Rejected {
-		m.setPhase(phaseNamingSprite)
+		m.showHome(homeNamingSprite)
 		m.nameInput.Focus()
 		if result.Err == nil {
 			m.notice = "Create failed."
@@ -235,7 +235,7 @@ func (m Model) updateCreateDone(msg createDone) (tea.Model, tea.Cmd) {
 	}
 	m.home.createBlock = result.Name
 	m.home.createNotice = "Creation outcome is unknown. Reconcile " + printable(result.Name) + " before creating another Sprite."
-	m.setPhase(phaseReady)
+	m.showHome(homeReady)
 	return m, m.beginSilentInventory()
 }
 
@@ -249,7 +249,7 @@ func (m *Model) beginSilentInventory() tea.Cmd {
 
 func (m *Model) beginInventoryWithFeedback(visible bool) tea.Cmd {
 	opID, ctx := m.beginOperation()
-	if m.currentPhase() != phaseLoading {
+	if m.home.phase != homeLoading {
 		m.home.inventoryRefreshing = true
 		m.home.inventoryRefreshVisible = visible
 	}
@@ -265,7 +265,7 @@ func (m *Model) beginCreate(name string) tea.Cmd {
 		return nil
 	}
 	opID, ctx := m.beginOperation()
-	m.setPhase(phaseCreatingSprite)
+	m.showHome(homeCreatingSprite)
 	return func() tea.Msg { return createDone{opID: opID, result: operations.Create(ctx, name)} }
 }
 
