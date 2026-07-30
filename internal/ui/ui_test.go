@@ -202,7 +202,7 @@ func TestWideReadyViewUsesCenteredContentHeightSections(t *testing.T) {
 	}
 }
 
-func TestMainSurfaceWidthTracksNamesWithinBounds(t *testing.T) {
+func TestBrowserPanelWidthTracksNamesWithinBounds(t *testing.T) {
 	model := ready(t, &fakeOperations{})
 	model.width = 160
 
@@ -210,20 +210,34 @@ func TestMainSurfaceWidthTracksNamesWithinBounds(t *testing.T) {
 		model.browser.SetItems([]list.Item{browserItem{destination: catalog.Destination{Label: label}}})
 	}
 	setLabel("short")
-	if got := model.surfaceWidth(); got != minSurfaceWidth {
-		t.Fatalf("short-name width = %d, want minimum %d", got, minSurfaceWidth)
+	if got := model.browserPanelWidth(model.surfaceWidth()); got != minBrowserPanelWidth {
+		t.Fatalf("short-name width = %d, want minimum %d", got, minBrowserPanelWidth)
 	}
 	setLabel(strings.Repeat("a", 50))
-	if got, want := model.surfaceWidth(), 50+browserMarkerWidth+browserStatusGap+browserStatusWidth+browserPanelChrome; got != want {
+	if got, want := model.browserPanelWidth(model.surfaceWidth()), 50+browserMarkerWidth+browserStatusGap+browserStatusWidth+browserPanelChrome; got != want {
 		t.Fatalf("content width = %d, want %d", got, want)
 	}
 	setLabel(strings.Repeat("a", 100))
-	if got := model.surfaceWidth(); got != maxSurfaceWidth {
-		t.Fatalf("long-name width = %d, want maximum %d", got, maxSurfaceWidth)
+	if got := model.browserPanelWidth(model.surfaceWidth()); got != maxBrowserPanelWidth {
+		t.Fatalf("long-name width = %d, want maximum %d", got, maxBrowserPanelWidth)
 	}
 	model.width = 40
-	if got, want := model.surfaceWidth(), 40-surfaceHorizontalMargin; got != want {
+	if got, want := model.browserPanelWidth(model.surfaceWidth()), 40-surfaceHorizontalMargin; got != want {
 		t.Fatalf("narrow-terminal width = %d, want %d", got, want)
+	}
+}
+
+func TestWideMainSurfaceKeepsCompleteKeyHints(t *testing.T) {
+	model := ready(t, &fakeSpriteOperations{fakeOperations: &fakeOperations{}})
+	model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
+	plain := ansi.Strip(model.View().Content)
+	for _, hint := range []string{"↑/↓ move", "enter open", "n new Sprite", "/ filter", "r refresh", "? more"} {
+		if !strings.Contains(plain, hint) {
+			t.Errorf("wide view truncated key hint %q: %q", hint, plain)
+		}
+	}
+	if got := model.surfaceWidth(); got != maxSurfaceWidth {
+		t.Fatalf("wide surface width = %d, want %d", got, maxSurfaceWidth)
 	}
 }
 
@@ -239,7 +253,7 @@ func TestMainSurfaceKeepsNamePaddingAndAlignedStatusColumn(t *testing.T) {
 	model := ready(t, ops)
 	model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
 	plain := ansi.Strip(model.View().Content)
-	wantWidth := max(minSurfaceWidth, len(spriteName)+browserMarkerWidth+browserStatusGap+browserStatusWidth+browserPanelChrome)
+	wantWidth := max(minBrowserPanelWidth, len(spriteName)+browserMarkerWidth+browserStatusGap+browserStatusWidth+browserPanelChrome)
 	for _, line := range strings.Split(plain, "\n") {
 		if strings.Contains(line, "Sprites") && strings.Contains(line, "╭") {
 			if got := lipgloss.Width(strings.TrimSpace(line)); got != wantWidth {
@@ -271,9 +285,9 @@ func TestMainSurfaceKeepsNamePaddingAndAlignedStatusColumn(t *testing.T) {
 	if localStatusColumn != spriteStatusColumn {
 		t.Fatalf("status columns differ: local %d Sprite %d\n%s\n%s", localStatusColumn, spriteStatusColumn, localLine, nameLine)
 	}
-	beforeFilter := model.surfaceWidth()
+	beforeFilter := model.browserPanelWidth(model.surfaceWidth())
 	model.browser.SetFilterText("default")
-	if afterFilter := model.surfaceWidth(); afterFilter != beforeFilter {
+	if afterFilter := model.browserPanelWidth(model.surfaceWidth()); afterFilter != beforeFilter {
 		t.Fatalf("filter changed surface width from %d to %d", beforeFilter, afterFilter)
 	}
 }
@@ -921,6 +935,15 @@ func TestBrowserLayoutUsesCompactSpacingAndConditionalPagination(t *testing.T) {
 	model, _ = update(t, model, tea.WindowSizeMsg{Width: 50, Height: 12})
 	if !model.browser.ShowPagination() || model.browser.Paginator.TotalPages <= 1 {
 		t.Fatalf("pagination = shown %v pages %d", model.browser.ShowPagination(), model.browser.Paginator.TotalPages)
+	}
+	plain := ansi.Strip(model.View().Content)
+	if !strings.Contains(plain, "Showing ") || !strings.Contains(plain, "╰") {
+		t.Fatalf("custom list clipped pagination or panel border: %q", plain)
+	}
+	model.browser.SetFilterText("session")
+	plain = ansi.Strip(model.View().Content)
+	if !strings.Contains(plain, "Filter") || !strings.Contains(plain, "Showing ") || !strings.Contains(plain, "╰") {
+		t.Fatalf("filtered list clipped filter, pagination, or panel border: %q", plain)
 	}
 }
 

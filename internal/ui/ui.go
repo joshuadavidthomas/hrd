@@ -29,9 +29,9 @@ const (
 	defaultWidth            = 80
 	defaultHeight           = 24
 	refreshInterval         = 10 * time.Second
-	minSurfaceWidth         = 60
-	maxSurfaceWidth         = 82
-	maxDetailSurfaceWidth   = 104
+	minBrowserPanelWidth    = 60
+	maxBrowserPanelWidth    = 82
+	maxSurfaceWidth         = 104
 	surfaceHorizontalMargin = 4
 	browserMarkerWidth      = 2
 	browserStatusGap        = 3
@@ -1560,20 +1560,60 @@ func (m Model) listWithWork(text string, width, height int) string {
 }
 
 func (m Model) listView(width, height int) string {
+	panelWidth := width
+	if m.screen == screenEndpoints {
+		panelWidth = m.browserPanelWidth(width)
+	}
+	centerPanel := func(panel string) string {
+		return lipgloss.PlaceHorizontal(width, lipgloss.Center, panel)
+	}
 	filter := ""
 	if m.browser.FilterState() != list.Unfiltered {
 		filter = "Filter  " + m.browser.FilterInput.View()
 	}
 	visible := m.browser.VisibleItems()
 	selected := m.browser.Index()
-	overhead := 2
+	panelCount := 1
 	if m.screen == screenEndpoints {
-		overhead = 5
+		panelCount = 0
+		hasLocal := m.browser.FilterState() == list.Unfiltered && m.localSnapshot.loaded
+		hasSprites := m.browser.FilterState() == list.Unfiltered && m.spriteSnapshot.loaded
+		for _, raw := range visible {
+			item, ok := raw.(browserItem)
+			if !ok {
+				continue
+			}
+			switch item.destination.Endpoint.(type) {
+			case catalog.LocalEndpoint:
+				hasLocal = true
+			case catalog.SpriteEndpoint:
+				hasSprites = true
+			}
+		}
+		if hasLocal {
+			panelCount++
+		}
+		if hasSprites {
+			panelCount++
+		}
 	}
-	if filter != "" {
-		overhead++
+	layoutOverhead := func(showPage bool) int {
+		parts := panelCount
+		overhead := panelCount * 2
+		if filter != "" {
+			parts++
+			overhead++
+		}
+		if showPage {
+			parts++
+			overhead++
+		}
+		return overhead + max(0, parts-1)
 	}
-	maxRows := max(1, height-overhead)
+	maxRows := max(1, height-layoutOverhead(false))
+	if len(visible) > maxRows {
+		maxRows = max(1, height-layoutOverhead(true))
+	}
 	start := 0
 	if len(visible) > maxRows {
 		start = max(0, min(selected-maxRows/2, len(visible)-maxRows))
@@ -1614,29 +1654,30 @@ func (m Model) listView(width, height int) string {
 	}
 	parts := make([]string, 0, 4)
 	if filter != "" {
-		parts = append(parts, clip(filter, width))
+		parts = append(parts, centerPanel(lipgloss.NewStyle().Width(panelWidth).Render(clip(filter, panelWidth))))
 	}
 	if m.screen == screenSprite {
 		badge := "Herdr checked " + age(m.now(), m.spriteSnapshotDetail.observedAt) + " · " + fmt.Sprintf("%d", len(m.spriteSnapshotDetail.rows))
-		parts = append(parts, renderBrowserPanel(m.spriteName()+" sessions", badge, renderEntries(sessions), width, "No Herdr sessions found."))
+		parts = append(parts, centerPanel(renderBrowserPanel(m.spriteName()+" sessions", badge, renderEntries(sessions), panelWidth, "No Herdr sessions found.")))
 	} else {
 		if len(local) > 0 || (m.browser.FilterState() == list.Unfiltered && m.localSnapshot.loaded) {
 			badge := fmt.Sprintf("%d", len(m.localSnapshot.rows))
 			if !m.localSnapshot.current {
 				badge = "refresh failed · checked " + age(m.now(), m.localSnapshot.observedAt)
 			}
-			parts = append(parts, renderBrowserPanel("Local sessions", badge, renderEntries(local), width, "No local sessions."))
+			parts = append(parts, centerPanel(renderBrowserPanel("Local sessions", badge, renderEntries(local), panelWidth, "No local sessions.")))
 		}
 		if len(sprites) > 0 || (m.browser.FilterState() == list.Unfiltered && m.spriteSnapshot.loaded) {
 			badge := "checked " + age(m.now(), m.spriteSnapshot.observedAt) + " · " + fmt.Sprintf("%d", len(m.spriteSnapshot.rows))
 			if !m.spriteSnapshot.current {
 				badge = "refresh failed · checked " + age(m.now(), m.spriteSnapshot.observedAt)
 			}
-			parts = append(parts, renderBrowserPanel("Sprites", badge, renderEntries(sprites), width, "No Sprites."))
+			parts = append(parts, centerPanel(renderBrowserPanel("Sprites", badge, renderEntries(sprites), panelWidth, "No Sprites.")))
 		}
 	}
 	if start > 0 || end < len(visible) {
-		parts = append(parts, mutedStyle.Render(fmt.Sprintf("Showing %d–%d of %d", start+1, end, len(visible))))
+		page := lipgloss.NewStyle().Width(panelWidth).Render(mutedStyle.Render(fmt.Sprintf("Showing %d–%d of %d", start+1, end, len(visible))))
+		parts = append(parts, centerPanel(page))
 	}
 	return fitView(strings.Join(parts, "\n\n"), width, height)
 }
@@ -1848,11 +1889,11 @@ func (m Model) spriteName() string {
 }
 
 func (m Model) surfaceWidth() int {
-	available := max(1, m.width-surfaceHorizontalMargin)
-	if m.screen != screenEndpoints {
-		return min(available, maxDetailSurfaceWidth)
-	}
-	ideal := minSurfaceWidth
+	return max(1, min(maxSurfaceWidth, m.width-surfaceHorizontalMargin))
+}
+
+func (m Model) browserPanelWidth(available int) int {
+	ideal := minBrowserPanelWidth
 	for _, raw := range m.browser.Items() {
 		item, ok := raw.(browserItem)
 		if !ok {
@@ -1862,7 +1903,7 @@ func (m Model) surfaceWidth() int {
 			browserMarkerWidth + browserStatusGap + browserStatusWidth + browserPanelChrome
 		ideal = max(ideal, rowWidth)
 	}
-	return min(available, min(maxSurfaceWidth, ideal))
+	return max(1, min(available, min(maxBrowserPanelWidth, ideal)))
 }
 
 func (m *Model) resizeComponents() {
