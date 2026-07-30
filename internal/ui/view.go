@@ -18,7 +18,7 @@ func (m Model) busy() bool {
 	if m.home.inventoryRefreshing && m.home.inventoryRefreshVisible {
 		return true
 	}
-	switch m.phase {
+	switch m.currentPhase() {
 	case phaseCreatingSprite, phaseLoadingSprite, phaseRefreshingSprite,
 		phaseInstallingSpriteHerdr, phaseStopping, phasePreparing, phaseStartingSSHAgent:
 		return true
@@ -40,7 +40,7 @@ var (
 
 // View renders a compact surface centered when the terminal has room.
 func (m Model) View() tea.View {
-	if m.phase == phaseLoading {
+	if m.currentPhase() == phaseLoading {
 		view := tea.NewView("")
 		view.AltScreen = true
 		view.WindowTitle = "hrd · Herdr sessions"
@@ -106,7 +106,7 @@ func (m Model) breadcrumbSegments() []string {
 		segments = append(segments, m.spriteName())
 	}
 
-	switch m.phase {
+	switch m.currentPhase() {
 	case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport:
 		if m.connection.destination.Label != "" {
 			segments = append(segments, printable(m.connection.destination.Label))
@@ -120,7 +120,7 @@ func (m Model) breadcrumbSegments() []string {
 }
 
 func (m Model) bodyView(width, height int) string {
-	switch m.phase {
+	switch m.currentPhase() {
 	case phaseLoading:
 		return ""
 	case phaseInitialLoadFailed:
@@ -215,7 +215,7 @@ func (m Model) toastView() string {
 	progress := ""
 	if m.home.inventoryRefreshing && m.home.inventoryRefreshVisible {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing local and Sprite inventory…")
-	} else if m.phase == phaseRefreshingSprite {
+	} else if m.currentPhase() == phaseRefreshingSprite {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing "+m.spriteName()+" sessions…")
 	}
 	messages := append([]string(nil), notices...)
@@ -462,7 +462,7 @@ func (m Model) transportView(width int) string {
 		"",
 		panel,
 	}
-	if m.phase == phasePreparing && m.connection.transport == catalog.NativePreview {
+	if m.currentPhase() == phasePreparing && m.connection.transport == catalog.NativePreview {
 		parts = append(parts, "", m.busyLine("Preparing native connection…", chooserWidth))
 	}
 	content := strings.Join(parts, "\n")
@@ -545,7 +545,7 @@ func (m Model) helpView() string {
 	cancelTo := func(destination string) key.Binding {
 		return key.NewBinding(key.WithKeys("n", "esc"), key.WithHelp("n/esc", destination))
 	}
-	switch m.phase {
+	switch m.currentPhase() {
 	case phaseNamingSprite:
 		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("home"), m.keys.force}
 	case phaseChoosingSpriteTransport:

@@ -9,6 +9,7 @@ import (
 )
 
 type sessionsState struct {
+	phase                   phase
 	spriteEndpoint          catalog.Destination
 	spriteEndpointSelection catalog.SpriteEndpointSelection
 	spriteDetailEndpointID  catalog.DestinationID
@@ -50,15 +51,15 @@ func (m Model) updateSpriteInstallConfirmation(msg tea.KeyPressMsg) (tea.Model, 
 }
 
 func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || msg.endpointID != m.sessions.spriteDetailEndpointID || (m.phase != phaseLoadingSprite && m.phase != phaseRefreshingSprite) {
+	if msg.opID != m.operation.id || msg.endpointID != m.sessions.spriteDetailEndpointID || (m.currentPhase() != phaseLoadingSprite && m.currentPhase() != phaseRefreshingSprite) {
 		return m, nil
 	}
-	initial := m.phase == phaseLoadingSprite
+	initial := m.currentPhase() == phaseLoadingSprite
 	m.cancelOperation()
 	if errors.Is(msg.err, catalog.ErrSpriteHerdrMissing) {
 		m.sessions.spriteSnapshotDetail = sourceSnapshot{}
 		m.refreshNotice = ""
-		m.phase = phaseConfirmingSpriteInstall
+		m.setPhase(phaseConfirmingSpriteInstall)
 		m.syncSpriteItems("")
 		return m, nil
 	}
@@ -69,7 +70,7 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 		m.sessions.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), msg.rows...), loaded: true, current: true}
 		m.refreshNotice = ""
 	}
-	m.phase = phaseReady
+	m.setPhase(phaseReady)
 	selected := m.selectedID
 	if initial {
 		selected = ""
@@ -79,16 +80,16 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 }
 
 func (m Model) updateInstallSpriteHerdrDone(msg installSpriteHerdrDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.phase != phaseInstallingSpriteHerdr {
+	if msg.opID != m.operation.id || m.currentPhase() != phaseInstallingSpriteHerdr {
 		return m, nil
 	}
 	m.cancelOperation()
 	if msg.err != nil {
 		m.notice = "Couldn’t install Herdr: " + printable(msg.err.Error())
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return m, nil
 	}
-	m.phase = phaseLoadingSprite
+	m.setPhase(phaseLoadingSprite)
 	cmd := m.beginSpriteSessions()
 	return m, tea.Batch(cmd, m.spinner.Tick)
 }
@@ -113,7 +114,7 @@ func (m *Model) beginInstallSpriteHerdr() tea.Cmd {
 		return nil
 	}
 	opID, ctx := m.beginOperation()
-	m.phase = phaseInstallingSpriteHerdr
+	m.setPhase(phaseInstallingSpriteHerdr)
 	selection := m.sessions.spriteEndpointSelection
 	return func() tea.Msg {
 		return installSpriteHerdrDone{opID: opID, err: operations.InstallSpriteHerdr(ctx, selection)}
@@ -121,7 +122,7 @@ func (m *Model) beginInstallSpriteHerdr() tea.Cmd {
 }
 
 func (m *Model) beginSpriteRefresh() tea.Cmd {
-	m.phase = phaseRefreshingSprite
+	m.setPhase(phaseRefreshingSprite)
 	cmd := m.beginSpriteSessions()
 	return tea.Batch(cmd, m.spinner.Tick)
 }

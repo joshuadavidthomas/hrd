@@ -45,6 +45,7 @@ type prepareOperation struct {
 }
 
 type connectionState struct {
+	phase            phase
 	destination      catalog.Destination
 	prepare          prepareOperation
 	prepared         catalog.PreparedAttach
@@ -69,7 +70,7 @@ func (m Model) updateTransport(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "esc":
 		m.connection.restart = false
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return m, nil
 	case "enter":
 		if m.connection.restart {
@@ -88,20 +89,20 @@ func (m Model) updateStopConfirmation(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	case "y", "enter":
 		if m.connection.restart {
 			m.connection.transport = catalog.NativePreview
-			m.phase = phaseChoosingSpriteTransport
+			m.setPhase(phaseChoosingSpriteTransport)
 			return m, nil
 		}
 		cmd := m.beginStop(m.connection.destination)
 		return m, tea.Batch(cmd, m.spinner.Tick)
 	case "n", "esc":
 		m.connection.restart = false
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 	}
 	return m, nil
 }
 
 func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.phase != phasePreparing {
+	if msg.opID != m.operation.id || m.currentPhase() != phasePreparing {
 		closePrepared(msg.prepared)
 		return m, nil
 	}
@@ -110,7 +111,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 		closePrepared(msg.prepared)
 		if !m.connection.restartStopped && m.connection.prepare.sprite && m.connection.prepare.transport == catalog.SSHFallback {
 			if source, choices, ok := catalog.SSHKeyChoices(msg.err); ok {
-				m.phase = phaseChoosingSSHKey
+				m.setPhase(phaseChoosingSSHKey)
 				m.connection.sshKeySource = printable(source)
 				m.connection.sshKeyChoices = append([]catalog.SSHIdentity(nil), choices...)
 				m.connection.sshKeyCursor = 0
@@ -127,7 +128,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 			cmd := m.beginSpriteRefresh()
 			return m, cmd
 		}
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return m, nil
 	}
 	if msg.prepared == nil {
@@ -137,14 +138,14 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 			cmd := m.beginSpriteRefresh()
 			return m, cmd
 		}
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return m, nil
 	}
 	m.connection.prepared = msg.prepared
 	switch prepared := msg.prepared.(type) {
 	case catalog.PreparedProcessAttach:
 		if prepared.Fingerprint != "" {
-			m.phase = phaseConfirmingHostKey
+			m.setPhase(phaseConfirmingHostKey)
 			return m, nil
 		}
 		cmd := m.beginProcessAttach(prepared)
@@ -159,7 +160,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 				cmd := m.beginSpriteRefresh()
 				return m, cmd
 			}
-			m.phase = phaseReady
+			m.setPhase(phaseReady)
 			return m, nil
 		}
 		cmd := m.beginNativeAttach(prepared)
@@ -173,13 +174,13 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 			cmd := m.beginSpriteRefresh()
 			return m, cmd
 		}
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return m, nil
 	}
 }
 
 func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.phase != phaseAttaching {
+	if msg.opID != m.operation.id || m.currentPhase() != phaseAttaching {
 		return m, nil
 	}
 	closePrepared(m.connection.prepared)
@@ -194,12 +195,12 @@ func (m Model) updateAttachDone(msg attachDone) (tea.Model, tea.Cmd) {
 		cmd := m.beginSpriteRefresh()
 		return m, cmd
 	}
-	m.phase = phaseReady
+	m.setPhase(phaseReady)
 	return m, m.beginSilentInventory()
 }
 
 func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.phase != phaseStartingSSHAgent {
+	if msg.opID != m.operation.id || m.currentPhase() != phaseStartingSSHAgent {
 		return m, nil
 	}
 	m.cancelOperation()
@@ -208,21 +209,21 @@ func (m Model) updateSSHAddReady(msg sshAddReady) (tea.Model, tea.Cmd) {
 			msg.err = fmt.Errorf("no ssh-add command")
 		}
 		m.notice = "Couldn’t start ssh-add: " + printable(msg.err.Error())
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return m, nil
 	}
-	m.phase = phaseAddingSSHKey
+	m.setPhase(phaseAddingSSHKey)
 	opID := msg.opID
 	return m, m.execProcess(msg.command, func(err error) tea.Msg { return sshAddDone{opID: opID, err: err} })
 }
 
 func (m Model) updateSSHAddDone(msg sshAddDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.phase != phaseAddingSSHKey {
+	if msg.opID != m.operation.id || m.currentPhase() != phaseAddingSSHKey {
 		return m, nil
 	}
 	if msg.err != nil {
 		m.notice = "ssh-add did not load a key: " + printable(msg.err.Error())
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return m, nil
 	}
 	cmd := m.retrySpritePrepare()
@@ -237,7 +238,7 @@ func (m Model) updateSSHKeyChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.connection.sshKeyCursor = min(max(0, len(m.connection.sshKeyChoices)-1), m.connection.sshKeyCursor+1)
 	case "esc":
 		m.connection.sshKeyChoices = nil
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 	case "enter":
 		if m.connection.sshKeyCursor < 0 || m.connection.sshKeyCursor >= len(m.connection.sshKeyChoices) {
 			return m, nil
@@ -266,17 +267,17 @@ func (m *Model) beginStop(destination catalog.Destination) tea.Cmd {
 	selection, err := catalog.SelectSpriteSession(destination)
 	if err != nil {
 		m.notice = "Couldn’t stop session: " + printable(err.Error())
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return nil
 	}
 	opID, ctx := m.beginOperation()
-	m.phase = phaseStopping
+	m.setPhase(phaseStopping)
 	return func() tea.Msg { return stopDone{opID: opID, err: operations.StopSpriteSession(ctx, selection)} }
 }
 
 func (m *Model) beginPrepareLocal(destination catalog.Destination) tea.Cmd {
 	opID, ctx := m.beginOperation()
-	m.phase = phasePreparing
+	m.setPhase(phasePreparing)
 	m.connection.prepare = prepareOperation{destination: destination}
 	operations := m.operations
 	return func() tea.Msg {
@@ -298,11 +299,11 @@ func (m *Model) startPrepareSprite(destination catalog.Destination, transport ca
 	selection, err := catalog.SelectSpriteSession(destination)
 	if err != nil {
 		m.notice = prepareFailureNotice(err)
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return nil
 	}
 	opID, ctx := m.beginOperation()
-	m.phase = phasePreparing
+	m.setPhase(phasePreparing)
 	m.connection.prepare = prepareOperation{destination: destination, transport: transport, sprite: true}
 	return func() tea.Msg {
 		prepared, err := operations.PrepareSprite(ctx, selection, transport)
@@ -314,12 +315,12 @@ func (m *Model) beginSSHKeyRecovery() tea.Cmd {
 	operations, ok := m.operations.(spriteOperations)
 	if !ok {
 		m.notice = "Couldn’t start ssh-add."
-		m.phase = phaseReady
+		m.setPhase(phaseReady)
 		return nil
 	}
 	m.connection.sshRecoveryTried = true
 	opID, ctx := m.beginOperation()
-	m.phase = phaseStartingSSHAgent
+	m.setPhase(phaseStartingSSHAgent)
 	return func() tea.Msg {
 		command, err := operations.SSHAddCommand(ctx)
 		return sshAddReady{opID: opID, command: command, err: err}
@@ -346,14 +347,14 @@ func (m *Model) beginProcessAttach(prepared catalog.PreparedProcessAttach) tea.C
 		environment = withEnvironment(environment, "SSH_AUTH_SOCK", socket)
 	}
 	command.Env = environment
-	m.phase = phaseAttaching
+	m.setPhase(phaseAttaching)
 	opID := m.operation.id
 	return m.execProcess(command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
 
 func (m *Model) beginNativeAttach(prepared catalog.PreparedNativeAttach) tea.Cmd {
 	m.invalidateSpriteAttachObservations()
-	m.phase = phaseAttaching
+	m.setPhase(phaseAttaching)
 	opID := m.operation.id
 	return m.execCommand(prepared.Command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
@@ -396,7 +397,7 @@ func withEnvironment(environment []string, name, value string) []string {
 	return append(result, name+"="+value)
 }
 func (m Model) updateStopDone(msg stopDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || m.phase != phaseStopping {
+	if msg.opID != m.operation.id || m.currentPhase() != phaseStopping {
 		return m, nil
 	}
 	m.cancelOperation()

@@ -55,6 +55,14 @@ const (
 	screenSprite
 )
 
+type workflow uint8
+
+const (
+	workflowHome workflow = iota + 1
+	workflowSessions
+	workflowConnection
+)
+
 type phase uint8
 
 const (
@@ -126,7 +134,7 @@ type Model struct {
 	keys        keyMap
 
 	screen screen
-	phase  phase
+	active workflow
 	width  int
 	height int
 
@@ -193,7 +201,7 @@ func New(root context.Context, operations Operations) Model {
 		execCommand: tea.Exec,
 		keys:        newKeyMap(),
 		screen:      screenEndpoints,
-		phase:       phaseLoading,
+		active:      workflowHome,
 		width:       defaultWidth,
 		height:      defaultHeight,
 		browser:     browser,
@@ -201,6 +209,7 @@ func New(root context.Context, operations Operations) Model {
 		help:        helpModel,
 		nameInput:   name,
 	}
+	m.home.phase = phaseLoading
 	m.initialCmd = m.beginInventory()
 	return m
 }
@@ -208,6 +217,44 @@ func New(root context.Context, operations Operations) Model {
 // Init starts inventory loading and silent background refresh.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.initialCmd, scheduleRefresh())
+}
+
+func (m Model) currentPhase() phase {
+	switch m.active {
+	case workflowHome:
+		return m.home.phase
+	case workflowSessions:
+		return m.sessions.phase
+	case workflowConnection:
+		return m.connection.phase
+	default:
+		panic("ui: invalid active workflow")
+	}
+}
+
+func (m *Model) setPhase(next phase) {
+	switch next {
+	case phaseLoading, phaseInitialLoadFailed, phaseNamingSprite, phaseCreatingSprite:
+		m.active = workflowHome
+		m.home.phase = next
+	case phaseLoadingSprite, phaseConfirmingSpriteInstall, phaseInstallingSpriteHerdr, phaseRefreshingSprite:
+		m.active = workflowSessions
+		m.sessions.phase = next
+	case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport, phasePreparing,
+		phaseConfirmingHostKey, phaseStartingSSHAgent, phaseAddingSSHKey, phaseChoosingSSHKey, phaseAttaching:
+		m.active = workflowConnection
+		m.connection.phase = next
+	case phaseReady:
+		if m.screen == screenSprite {
+			m.active = workflowSessions
+			m.sessions.phase = next
+		} else {
+			m.active = workflowHome
+			m.home.phase = next
+		}
+	default:
+		panic("ui: invalid phase")
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -233,7 +280,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case refreshTick:
 		cmds := make([]tea.Cmd, 0, 2)
-		if m.screen == screenEndpoints && m.phase == phaseReady && !m.home.inventoryRefreshing {
+		if m.screen == screenEndpoints && m.currentPhase() == phaseReady && !m.home.inventoryRefreshing {
 			cmds = append(cmds, m.beginSilentInventory())
 		}
 		cmds = append(cmds, scheduleRefresh())
@@ -264,7 +311,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	textEditing := m.phase == phaseNamingSprite || (m.phase == phaseReady && m.browser.SettingFilter())
+	textEditing := m.currentPhase() == phaseNamingSprite || (m.currentPhase() == phaseReady && m.browser.SettingFilter())
 	if key.Matches(msg, m.keys.force) || (key.Matches(msg, m.keys.quit) && !textEditing) {
 		m.cancelOperation()
 		closePrepared(m.connection.prepared)
@@ -273,7 +320,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	switch m.phase {
+	switch m.currentPhase() {
 	case phaseNamingSprite:
 		return m.updateName(msg)
 	case phaseChoosingSpriteTransport:
@@ -304,7 +351,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case phaseInitialLoadFailed:
 		if key.Matches(msg, m.keys.refresh) {
-			m.phase = phaseLoading
+			m.setPhase(phaseLoading)
 			m.refreshNotice = ""
 			cmd := m.beginInventory()
 			return m, cmd
@@ -314,7 +361,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.phase != phaseReady {
+	if m.currentPhase() != phaseReady {
 		return m, nil
 	}
 	if key.Matches(msg, m.keys.help) && !m.browser.SettingFilter() {
@@ -343,7 +390,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
 				m.connection.destination = destination
 				m.connection.restart = false
-				m.phase = phaseConfirmingStop
+				m.setPhase(phaseConfirmingStop)
 			}
 			return m, nil
 		}
@@ -351,7 +398,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if destination, ok := m.selectedSpriteSessionForMutation(); ok {
 				m.connection.destination = destination
 				m.connection.restart = true
-				m.phase = phaseConfirmingStop
+				m.setPhase(phaseConfirmingStop)
 			}
 			return m, nil
 		}
@@ -363,7 +410,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.nameInput.SetValue("")
 			m.nameInput.Focus()
 			m.notice = ""
-			m.phase = phaseNamingSprite
+			m.setPhase(phaseNamingSprite)
 		}
 		return m, nil
 	}
@@ -385,7 +432,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.sessions.open(destination, selection)
 				m.home.invalidateSprites()
 				m.screen = screenSprite
-				m.phase = phaseLoadingSprite
+				m.setPhase(phaseLoadingSprite)
 				m.browser.ResetFilter()
 				m.browser.SetItems(nil)
 				cmd := m.beginSpriteSessions()
@@ -397,7 +444,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.connection.destination = destination
 		m.connection.restart = false
 		m.connection.transport = catalog.NativePreview
-		m.phase = phaseChoosingSpriteTransport
+		m.setPhase(phaseChoosingSpriteTransport)
 		return m, nil
 	}
 
@@ -417,7 +464,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) returnToEndpoints() tea.Cmd {
 	m.screen = screenEndpoints
-	m.phase = phaseReady
+	m.setPhase(phaseReady)
 	m.browser.ResetFilter()
 	m.syncEndpointItems(m.home.endpointSelection)
 	if !m.home.spriteSnapshot.loaded || m.home.spriteSnapshot.current {
