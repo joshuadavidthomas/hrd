@@ -403,7 +403,7 @@ func TestNativeCommandExactTransportAndBinaryIO(t *testing.T) {
 			"path":  {nativeExecutable},
 			"tty":   {"true"},
 			"stdin": {"true"},
-			"env":   {nativeTerminalEnvironment},
+			"env":   {nativeTerminalEnvironment, nativeShellEnvironment},
 			"rows":  {"24"},
 			"cols":  {"80"},
 		}

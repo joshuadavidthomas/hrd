@@ -22,6 +22,8 @@ const usageText = `hrd — choose a Herdr destination
 Usage:
   hrd
 
+Run hrd from a terminal outside Herdr; nested launches are rejected.
+
 Sprite support:
   SPRITE_TOKEN  enable Sprite inventory, creation, and attach
   Native        default; Herdr and its config run inside the Sprite
@@ -49,6 +51,10 @@ func run(args []string, stdout, stderr *os.File) int {
 		_, _ = fmt.Fprint(stdout, usageText)
 		return 0
 	}
+	if err := validateLaunchEnvironment(os.Getenv); err != nil {
+		_, _ = fmt.Fprintf(stderr, "hrd: %v\n", err)
+		return 1
+	}
 
 	root, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -73,6 +79,13 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 	return 0
+}
+
+func validateLaunchEnvironment(getenv func(string) string) error {
+	if getenv("HERDR_ENV") != "" {
+		return fmt.Errorf("cannot run inside a Herdr pane; open a terminal outside Herdr")
+	}
+	return nil
 }
 
 func parseArgs(args []string) (bool, error) {

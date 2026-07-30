@@ -2,7 +2,8 @@
 
 `hrd` is a terminal picker for local Herdr sessions and Sprites. It gives the
 terminal to the selected destination and refreshes after you detach with
-`ctrl+b q`.
+`ctrl+b q`. Run it from a terminal outside Herdr: `hrd` rejects nested launches
+so the outer session cannot steal the inner session's keybindings.
 
 ## Requirements
 
@@ -33,11 +34,12 @@ it outside `hrd`.
 
 Selecting a Sprite opens two fixed choices:
 
-- `Native Sprite terminal` is the preview default. It runs
+- `Native Sprite terminal` is the default. It runs
   `/home/sprite/.local/bin/herdr` inside the Sprite with the Sprites terminal
-  API. Herdr and its config live in the Sprite; no SSH key or service is needed.
-- `SSH thin client` keeps local Herdr and local integrations in use. It is a
-  temporary fallback while native attachment is tested.
+  API and sets `/bin/bash` as the shell for new panes. Herdr and its config live
+  in the Sprite; no SSH key or service is needed.
+- `SSH thin client` keeps local Herdr and local integrations in use. It remains
+  available as the transport for sandbox providers without a native exec PTY.
 
 For native attachment, `hrd` checks the fixed Herdr path. When Herdr is absent,
 it downloads <https://herdr.dev/install.sh> to a validated temporary path, runs
