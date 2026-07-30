@@ -1415,43 +1415,18 @@ func (m Model) breadcrumbSegments() []string {
 	if m.screen == screenSprite {
 		segments = append(segments, m.spriteName())
 	}
-	if m.phase == phaseReady && m.browser.SettingFilter() {
-		return append(segments, "Filter")
-	}
 
 	switch m.phase {
-	case phaseNamingSprite, phaseCreatingSprite:
-		return append(segments, "New Sprite")
-	case phaseConfirmingSpriteInstall, phaseInstallingSpriteHerdr:
-		return append(segments, "Install Herdr")
-	case phaseConfirmingStop, phaseStopping:
+	case phaseConfirmingStop, phaseStopping, phaseChoosingSpriteTransport:
 		if m.confirmDest.Label != "" {
 			segments = append(segments, printable(m.confirmDest.Label))
 		}
-		action := "Stop"
-		if m.restart {
-			action = "Restart"
-		}
-		return append(segments, action)
-	case phaseChoosingSpriteTransport:
-		if m.confirmDest.Label != "" {
-			segments = append(segments, printable(m.confirmDest.Label))
-		}
-		if m.restart {
-			segments = append(segments, "Restart")
-		}
-		return append(segments, "Connect")
 	case phasePreparing, phaseConfirmingHostKey, phaseStartingSSHAgent, phaseAddingSSHKey, phaseChoosingSSHKey, phaseAttaching:
 		if m.activePrepare.destination.Label != "" {
 			segments = append(segments, printable(m.activePrepare.destination.Label))
 		}
-		if m.restartStopSucceeded {
-			segments = append(segments, "Restart")
-		}
-		return append(segments, "Connect")
-	default:
-		return segments
 	}
+	return segments
 }
 
 func (m Model) bodyView(width, height int) string {

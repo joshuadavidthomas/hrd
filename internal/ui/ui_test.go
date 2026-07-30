@@ -700,7 +700,7 @@ func TestTransportChooserUsesAnAlignedChoicePanel(t *testing.T) {
 	model, _ = update(t, model, press("enter"))
 	plain := ansi.Strip(model.View().Content)
 	for _, want := range []string{
-		"hrd  / Inventory / devbox / default / Connect",
+		"hrd  / Inventory / devbox / default",
 		"Choose a connection",
 		"Select where Herdr itself should run.",
 		"Native",
@@ -727,13 +727,13 @@ func TestBreadcrumbsAndEscapeHintsNameTheReturnDestination(t *testing.T) {
 		t.Fatalf("inventory breadcrumb = %q", breadcrumb)
 	}
 	model, _ = update(t, model, press("/"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / Filter" || !strings.Contains(ansi.Strip(model.helpView()), "esc list") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory" || !strings.Contains(ansi.Strip(model.helpView()), "esc list") {
 		t.Fatalf("filter context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	model, _ = update(t, model, press("esc"))
 
 	model, _ = update(t, model, press("n"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / New Sprite" || !strings.Contains(ansi.Strip(model.helpView()), "esc inventory") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory" || !strings.Contains(ansi.Strip(model.helpView()), "esc inventory") {
 		t.Fatalf("new Sprite context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	model, _ = update(t, model, press("esc"))
@@ -749,23 +749,23 @@ func TestBreadcrumbsAndEscapeHintsNameTheReturnDestination(t *testing.T) {
 	}
 
 	model, _ = update(t, model, press("enter"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / devbox / default / Connect" || !strings.Contains(ansi.Strip(model.helpView()), "esc sessions") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "esc sessions") {
 		t.Fatalf("transport context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	narrow := model
 	narrow.width = 40
 	narrowBreadcrumb := ansi.Strip(narrow.breadcrumbView())
-	if lipgloss.Width(narrowBreadcrumb) > narrow.surfaceWidth() || !strings.Contains(narrowBreadcrumb, "… / default / Connect") {
-		t.Fatalf("narrow breadcrumb lost current context: %q", narrowBreadcrumb)
+	if lipgloss.Width(narrowBreadcrumb) > narrow.surfaceWidth() || !strings.Contains(narrowBreadcrumb, "/ devbox / default") {
+		t.Fatalf("narrow breadcrumb lost current location: %q", narrowBreadcrumb)
 	}
 	tiny := model
 	tiny.width = 21
-	if breadcrumb := ansi.Strip(tiny.breadcrumbView()); !strings.Contains(breadcrumb, "/ Connect") || lipgloss.Width(breadcrumb) > tiny.surfaceWidth() {
-		t.Fatalf("tiny breadcrumb discarded current action: %q", breadcrumb)
+	if breadcrumb := ansi.Strip(tiny.breadcrumbView()); !strings.Contains(breadcrumb, "/ default") || lipgloss.Width(breadcrumb) > tiny.surfaceWidth() {
+		t.Fatalf("tiny breadcrumb discarded current location: %q", breadcrumb)
 	}
 	model, _ = update(t, model, press("esc"))
 	model, _ = update(t, model, press("s"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / devbox / default / Stop" || !strings.Contains(ansi.Strip(model.helpView()), "n/esc sessions") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "n/esc sessions") {
 		t.Fatalf("stop context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 }
