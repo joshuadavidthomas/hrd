@@ -260,3 +260,28 @@ func (m *Model) reconcileCreateBlock() {
 		}
 	}
 }
+
+func (m Model) homeView(width, height int) string {
+	switch m.home.phase {
+	case homeLoading:
+		return ""
+	case homeInitialLoadFailed:
+		return clip("No inventory source loaded. Press r to retry.", width)
+	case homeNamingSprite:
+		return fitView(strings.Join([]string{
+			"Name your Sprite",
+			m.nameInput.View(),
+			mutedStyle.Render("1–63 lowercase letters, digits, and interior hyphens"),
+			warningStyle.Render("Creating and waking a Sprite may incur charges."),
+		}, "\n"), width, height)
+	case homeCreatingSprite:
+		return m.busyLine("Creating "+m.nameInput.Value()+"…", width)
+	case homeReady:
+		if len(m.browser.Items()) == 0 {
+			return "No local sessions or Sprite endpoints found."
+		}
+		return m.listView(width, height)
+	default:
+		panic("ui: invalid Home phase")
+	}
+}
