@@ -26,9 +26,17 @@ import (
 )
 
 const (
-	defaultWidth    = 80
-	defaultHeight   = 24
-	refreshInterval = 10 * time.Second
+	defaultWidth            = 80
+	defaultHeight           = 24
+	refreshInterval         = 10 * time.Second
+	minSurfaceWidth         = 60
+	maxSurfaceWidth         = 82
+	maxDetailSurfaceWidth   = 104
+	surfaceHorizontalMargin = 4
+	browserMarkerWidth      = 2
+	browserStatusGap        = 3
+	browserStatusWidth      = 9
+	browserPanelChrome      = 4
 )
 
 // Operations is the catalog work used by the UI.
@@ -120,15 +128,15 @@ func renderBrowserRow(item browserItem, selected bool, width int) string {
 		marker = accentStyle.Render("› ")
 		labelStyle = selectedStyle
 	}
-	stateWidth := min(13, max(8, width/4))
-	labelWidth := max(1, width-2-stateWidth-1)
+	stateWidth := min(browserStatusWidth, max(1, width-browserMarkerWidth-browserStatusGap-1))
+	labelWidth := max(1, width-browserMarkerWidth-browserStatusGap-stateWidth)
 	label := labelStyle.Width(labelWidth).Render(clip(printable(item.destination.Label), labelWidth))
 	stateStyle := item.stateStyle
 	if item.stale {
 		stateStyle = warningStyle
 	}
 	state := stateStyle.Width(stateWidth).Render(clip(item.symbol+" "+item.state, stateWidth))
-	row := marker + label + " " + state
+	row := marker + label + strings.Repeat(" ", browserStatusGap) + state
 	if selected {
 		row = selectedRowStyle.Width(width).Render(row)
 	}
@@ -1365,7 +1373,7 @@ var (
 
 // View renders a compact surface centered when the terminal has room.
 func (m Model) View() tea.View {
-	surfaceWidth := max(1, min(104, m.width-4))
+	surfaceWidth := m.surfaceWidth()
 	m.help.SetWidth(surfaceWidth)
 
 	contextName := "Sessions & Sprites"
@@ -1839,8 +1847,26 @@ func (m Model) spriteName() string {
 	return "Sprite"
 }
 
+func (m Model) surfaceWidth() int {
+	available := max(1, m.width-surfaceHorizontalMargin)
+	if m.screen != screenEndpoints {
+		return min(available, maxDetailSurfaceWidth)
+	}
+	ideal := minSurfaceWidth
+	for _, raw := range m.browser.Items() {
+		item, ok := raw.(browserItem)
+		if !ok {
+			continue
+		}
+		rowWidth := lipgloss.Width(printable(item.destination.Label)) +
+			browserMarkerWidth + browserStatusGap + browserStatusWidth + browserPanelChrome
+		ideal = max(ideal, rowWidth)
+	}
+	return min(available, min(maxSurfaceWidth, ideal))
+}
+
 func (m *Model) resizeComponents() {
-	surfaceWidth := max(1, min(104, m.width-4))
+	surfaceWidth := m.surfaceWidth()
 	m.browser.SetWidth(surfaceWidth)
 	m.browser.SetHeight(max(1, m.height-9))
 	m.help.SetWidth(surfaceWidth)

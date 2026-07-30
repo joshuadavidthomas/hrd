@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -198,6 +199,82 @@ func TestWideReadyViewUsesCenteredContentHeightSections(t *testing.T) {
 		if strings.Contains(line, "devbox") && !strings.Contains(line, "running") {
 			t.Fatalf("Sprite status is not aligned on one row: %q", line)
 		}
+	}
+}
+
+func TestMainSurfaceWidthTracksNamesWithinBounds(t *testing.T) {
+	model := ready(t, &fakeOperations{})
+	model.width = 160
+
+	setLabel := func(label string) {
+		model.browser.SetItems([]list.Item{browserItem{destination: catalog.Destination{Label: label}}})
+	}
+	setLabel("short")
+	if got := model.surfaceWidth(); got != minSurfaceWidth {
+		t.Fatalf("short-name width = %d, want minimum %d", got, minSurfaceWidth)
+	}
+	setLabel(strings.Repeat("a", 50))
+	if got, want := model.surfaceWidth(), 50+browserMarkerWidth+browserStatusGap+browserStatusWidth+browserPanelChrome; got != want {
+		t.Fatalf("content width = %d, want %d", got, want)
+	}
+	setLabel(strings.Repeat("a", 100))
+	if got := model.surfaceWidth(); got != maxSurfaceWidth {
+		t.Fatalf("long-name width = %d, want maximum %d", got, maxSurfaceWidth)
+	}
+	model.width = 40
+	if got, want := model.surfaceWidth(), 40-surfaceHorizontalMargin; got != want {
+		t.Fatalf("narrow-terminal width = %d, want %d", got, want)
+	}
+}
+
+func TestMainSurfaceKeepsNamePaddingAndAlignedStatusColumn(t *testing.T) {
+	const spriteName = "sprite-django-language-server-d45b065e"
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(context.Context, int) catalog.Inventory {
+		return catalog.Inventory{
+			Local:   catalog.SourceResult{Rows: localRows()},
+			Sprites: catalog.SourceResult{Rows: spriteEndpointRows(spriteName, sprites.Cold)},
+		}
+	}
+	model := ready(t, ops)
+	model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
+	plain := ansi.Strip(model.View().Content)
+	wantWidth := max(minSurfaceWidth, len(spriteName)+browserMarkerWidth+browserStatusGap+browserStatusWidth+browserPanelChrome)
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "Sprites") && strings.Contains(line, "╭") {
+			if got := lipgloss.Width(strings.TrimSpace(line)); got != wantWidth {
+				t.Fatalf("Sprite panel width = %d, want %d: %q", got, wantWidth, line)
+			}
+		}
+	}
+	nameLine := ""
+	localLine := ""
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, spriteName) {
+			nameLine = line
+		}
+		if strings.Contains(line, "default") && strings.Contains(line, "running") {
+			localLine = line
+		}
+	}
+	if nameLine == "" || localLine == "" {
+		t.Fatalf("rendered rows missing: %q", plain)
+	}
+	nameEnd := strings.Index(nameLine, spriteName) + len(spriteName)
+	statusStart := strings.Index(nameLine, "○ cold")
+	if gap := statusStart - nameEnd; gap < browserStatusGap {
+		t.Fatalf("name/status gap = %d, want at least %d: %q", gap, browserStatusGap, nameLine)
+	}
+	localStatus := strings.Index(localLine, "● running")
+	localStatusColumn := lipgloss.Width(localLine[:localStatus])
+	spriteStatusColumn := lipgloss.Width(nameLine[:statusStart])
+	if localStatusColumn != spriteStatusColumn {
+		t.Fatalf("status columns differ: local %d Sprite %d\n%s\n%s", localStatusColumn, spriteStatusColumn, localLine, nameLine)
+	}
+	beforeFilter := model.surfaceWidth()
+	model.browser.SetFilterText("default")
+	if afterFilter := model.surfaceWidth(); afterFilter != beforeFilter {
+		t.Fatalf("filter changed surface width from %d to %d", beforeFilter, afterFilter)
 	}
 }
 
