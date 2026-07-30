@@ -303,11 +303,11 @@ func TestRefreshToastDoesNotMoveCenteredContent(t *testing.T) {
 		}
 		return -1, -1
 	}
-	baseRow, baseColumn := position(model.View().Content, "hrd  / Inventory")
+	baseRow, baseColumn := position(model.View().Content, "hrd")
 	model.inventoryRefreshing = true
 	model.inventoryRefreshVisible = true
 	refreshing := model.View().Content
-	toastRow, toastColumn := position(refreshing, "hrd  / Inventory")
+	toastRow, toastColumn := position(refreshing, "hrd")
 	if baseRow != toastRow || baseColumn != toastColumn {
 		t.Fatalf("refresh moved title from %d,%d to %d,%d", baseRow, baseColumn, toastRow, toastColumn)
 	}
@@ -700,7 +700,7 @@ func TestTransportChooserUsesAnAlignedChoicePanel(t *testing.T) {
 	model, _ = update(t, model, press("enter"))
 	plain := ansi.Strip(model.View().Content)
 	for _, want := range []string{
-		"hrd  / Inventory / devbox / default",
+		"hrd  / devbox / default",
 		"Choose a connection",
 		"Select where Herdr itself should run.",
 		"Native",
@@ -723,33 +723,33 @@ func TestTransportChooserUsesAnAlignedChoicePanel(t *testing.T) {
 func TestBreadcrumbsAndEscapeHintsNameTheReturnDestination(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	model := ready(t, ops)
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory" {
-		t.Fatalf("inventory breadcrumb = %q", breadcrumb)
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd" {
+		t.Fatalf("home breadcrumb = %q", breadcrumb)
 	}
 	model, _ = update(t, model, press("/"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory" || !strings.Contains(ansi.Strip(model.helpView()), "esc list") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd" || !strings.Contains(ansi.Strip(model.helpView()), "esc list") {
 		t.Fatalf("filter context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	model, _ = update(t, model, press("esc"))
 
 	model, _ = update(t, model, press("n"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory" || !strings.Contains(ansi.Strip(model.helpView()), "esc inventory") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd" || !strings.Contains(ansi.Strip(model.helpView()), "esc home") {
 		t.Fatalf("new Sprite context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	model, _ = update(t, model, press("esc"))
 
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / devbox" || !strings.Contains(ansi.Strip(model.helpView()), "esc inventory") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / devbox" || !strings.Contains(ansi.Strip(model.helpView()), "esc home") {
 		t.Fatalf("loading Sprite context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	model, _ = update(t, model, runFirst(t, load))
-	if help := ansi.Strip(model.helpView()); !strings.Contains(help, "esc inventory") {
+	if help := ansi.Strip(model.helpView()); !strings.Contains(help, "esc home") {
 		t.Fatalf("Sprite sessions do not name Escape destination: %q", help)
 	}
 
 	model, _ = update(t, model, press("enter"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "esc sessions") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "esc sessions") {
 		t.Fatalf("transport context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	narrow := model
@@ -765,7 +765,7 @@ func TestBreadcrumbsAndEscapeHintsNameTheReturnDestination(t *testing.T) {
 	}
 	model, _ = update(t, model, press("esc"))
 	model, _ = update(t, model, press("s"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / Inventory / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "n/esc sessions") {
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "n/esc sessions") {
 		t.Fatalf("stop context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 }
@@ -1122,7 +1122,7 @@ func TestHelpOnlyShowsSelectionCapabilities(t *testing.T) {
 	}
 	for _, phase := range []phase{phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr} {
 		model.phase = phase
-		if help := model.helpView(); !strings.Contains(help, "esc") || !strings.Contains(help, "inventory") {
+		if help := model.helpView(); !strings.Contains(help, "esc") || !strings.Contains(help, "home") {
 			t.Errorf("phase %v help = %q", phase, help)
 		}
 	}

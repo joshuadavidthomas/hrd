@@ -1393,8 +1393,11 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) breadcrumbView() string {
-	prefix := titleStyle.Render("hrd") + "  "
 	segments := m.breadcrumbSegments()
+	if len(segments) == 0 {
+		return titleStyle.Render("hrd")
+	}
+	prefix := titleStyle.Render("hrd") + "  "
 	available := max(1, m.surfaceWidth()-lipgloss.Width(prefix))
 	context := "/ " + strings.Join(segments, " / ")
 	for lipgloss.Width(context) > available && len(segments) > 1 {
@@ -1411,7 +1414,7 @@ func (m Model) breadcrumbView() string {
 }
 
 func (m Model) breadcrumbSegments() []string {
-	segments := []string{"Inventory"}
+	segments := make([]string, 0, 2)
 	if m.screen == screenSprite {
 		segments = append(segments, m.spriteName())
 	}
@@ -1856,7 +1859,7 @@ func (m Model) helpView() string {
 	}
 	switch m.phase {
 	case phaseNamingSprite:
-		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("inventory"), m.keys.force}
+		short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("home"), m.keys.force}
 	case phaseChoosingSpriteTransport:
 		short = []key.Binding{
 			key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")),
@@ -1867,7 +1870,7 @@ func (m Model) helpView() string {
 	case phasePreparing:
 		short = []key.Binding{m.keys.quit}
 	case phaseConfirmingSpriteInstall:
-		short = []key.Binding{m.keys.confirm, cancelTo("inventory"), m.keys.quit}
+		short = []key.Binding{m.keys.confirm, cancelTo("home"), m.keys.quit}
 	case phaseConfirmingStop:
 		short = []key.Binding{m.keys.confirm, cancelTo("sessions"), m.keys.quit}
 	case phaseConfirmingHostKey:
@@ -1875,7 +1878,7 @@ func (m Model) helpView() string {
 	case phaseChoosingSSHKey:
 		short = []key.Binding{key.NewBinding(key.WithKeys("↑/↓"), key.WithHelp("↑/↓", "choose")), key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "use key")), escapeTo("sessions"), m.keys.quit}
 	case phaseLoadingSprite, phaseRefreshingSprite, phaseInstallingSpriteHerdr:
-		short = []key.Binding{escapeTo("inventory"), m.keys.force}
+		short = []key.Binding{escapeTo("home"), m.keys.force}
 	case phaseReady:
 		if m.browser.SettingFilter() {
 			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}
@@ -1887,8 +1890,8 @@ func (m Model) helpView() string {
 			if _, ok := m.selectedSpriteSessionForMutation(); ok {
 				actions = append(actions, m.keys.stop, m.keys.restart)
 			}
-			navigation := []key.Binding{movement, escapeTo("inventory"), filtering, m.keys.refresh, m.keys.quit, m.keys.help}
-			short = []key.Binding{movement, escapeTo("inventory")}
+			navigation := []key.Binding{movement, escapeTo("home"), filtering, m.keys.refresh, m.keys.quit, m.keys.help}
+			short = []key.Binding{movement, escapeTo("home")}
 			short = append(short, actions...)
 			short = append(short, filtering, m.keys.refresh, m.keys.help)
 			full = [][]key.Binding{actions, navigation}
