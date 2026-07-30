@@ -122,23 +122,22 @@ func (browserDelegate) Render(w io.Writer, model list.Model, index int, raw list
 
 func renderBrowserRow(item browserItem, selected bool, width int) string {
 	marker := "  "
+	markerStyle := lipgloss.NewStyle()
 	labelStyle := lipgloss.NewStyle()
 	if selected {
-		marker = accentStyle.Render("› ")
+		marker = "› "
+		markerStyle = accentStyle
 		labelStyle = selectedStyle
 	}
 	stateWidth := min(browserStatusWidth, max(1, width-browserMarkerWidth-browserStatusGap-1))
 	labelWidth := max(1, width-browserMarkerWidth-browserStatusGap-stateWidth)
-	label := labelStyle.Width(labelWidth).Render(clip(printable(item.destination.Label), labelWidth))
 	stateStyle := item.stateStyle
 	if item.stale {
 		stateStyle = warningStyle
 	}
+	label := labelStyle.Width(labelWidth).Render(clip(printable(item.destination.Label), labelWidth))
 	state := stateStyle.Width(stateWidth).Render(clip(item.symbol+" "+item.state, stateWidth))
-	row := marker + label + strings.Repeat(" ", browserStatusGap) + state
-	if selected {
-		row = selectedRowStyle.Width(width).Render(row)
-	}
+	row := markerStyle.Render(marker) + label + strings.Repeat(" ", browserStatusGap) + state
 	return clip(row, width)
 }
 
@@ -1351,15 +1350,14 @@ func (m Model) busy() bool {
 }
 
 var (
-	accentStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	selectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	selectedRowStyle = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	titleStyle       = lipgloss.NewStyle().Bold(true)
-	mutedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	runningStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	warningStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	borderStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	accentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	titleStyle    = lipgloss.NewStyle().Bold(true)
+	mutedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	runningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	warningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	borderStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
 // View renders a compact surface centered when the terminal has room.
@@ -1471,7 +1469,7 @@ func (m Model) bodyView(width, height int) string {
 	case phaseAddingSSHKey:
 		return fitView("ssh-add has the terminal. Complete its prompt to continue.", width, height)
 	case phaseChoosingSSHKey:
-		return fitView(m.sshKeyView(), width, height)
+		return fitView(m.sshKeyView(width), width, height)
 	case phaseAttaching:
 		if m.activePrepare.sprite && m.activePrepare.transport == catalog.NativePreview {
 			return m.spriteReadyView(width, height)
@@ -1757,46 +1755,62 @@ func (m Model) transportView(width int) string {
 
 func renderTransportOption(title, badge, detail string, selected bool, width int) string {
 	contentWidth := max(1, width-4)
-	marker := mutedStyle.Render("○ ")
+	marker := "  "
+	markerStyle := lipgloss.NewStyle()
 	titleStyleForOption := lipgloss.NewStyle()
-	badgeStyle := mutedStyle
-	rowStyle := lipgloss.NewStyle()
 	if selected {
-		marker = accentStyle.Render("● ")
+		marker = "› "
+		markerStyle = accentStyle
 		titleStyleForOption = selectedStyle
-		badgeStyle = accentStyle
-		rowStyle = selectedRowStyle
 	}
+	badgeStyle := mutedStyle
+	detailStyle := mutedStyle
+
 	badgeWidth := lipgloss.Width(badge)
-	titleWidth := max(1, contentWidth-2-badgeWidth)
-	first := marker + titleStyleForOption.Width(titleWidth).Render(clip(title, titleWidth))
+	minimumTitleWidth := min(lipgloss.Width(title), max(1, contentWidth-browserMarkerWidth))
+	if badgeWidth > contentWidth-browserMarkerWidth-minimumTitleWidth {
+		badge = ""
+		badgeWidth = 0
+	}
+	titleWidth := max(1, contentWidth-browserMarkerWidth-badgeWidth)
+	first := markerStyle.Render(marker) + titleStyleForOption.Width(titleWidth).Render(clip(title, titleWidth))
 	if badge != "" {
 		first += badgeStyle.Render(badge)
 	}
-	second := "  " + mutedStyle.Render(clip(detail, max(1, contentWidth-2)))
-	first = rowStyle.Width(contentWidth).Render(first)
-	second = rowStyle.Width(contentWidth).Render(second)
+	detailWidth := max(1, contentWidth-browserMarkerWidth)
+	second := markerStyle.Render(strings.Repeat(" ", browserMarkerWidth)) + detailStyle.Width(detailWidth).Render(clip(detail, detailWidth))
 	return borderStyle.Render("│") + " " + first + " " + borderStyle.Render("│") + "\n" +
 		borderStyle.Render("│") + " " + second + " " + borderStyle.Render("│")
 }
 
-func (m Model) sshKeyView() string {
+func (m Model) sshKeyView(width int) string {
 	source := m.sshKeySource
 	if source == "" {
 		source = "ssh-agent"
 	}
 	lines := []string{fmt.Sprintf("%s exposes %d keys. Choose exactly one.", printable(source), len(m.sshKeyChoices))}
 	for index, choice := range m.sshKeyChoices {
+		selected := index == m.sshKeyCursor
 		marker := "  "
+		markerStyle := lipgloss.NewStyle()
+		labelStyle := lipgloss.NewStyle()
+		if selected {
+			marker = "› "
+			markerStyle = accentStyle
+			labelStyle = selectedStyle
+		}
 		label := printable(choice.Comment)
 		if label == "" {
 			label = "Unnamed key"
 		}
-		if index == m.sshKeyCursor {
-			marker = accentStyle.Render("› ")
-			label = selectedStyle.Render(label)
-		}
-		lines = append(lines, marker+label+"  "+mutedStyle.Render(printable(choice.Algorithm)))
+		algorithm := printable(choice.Algorithm)
+		algorithmWidth := min(lipgloss.Width(algorithm), max(1, width-browserMarkerWidth-browserStatusGap-1))
+		labelWidth := max(1, width-browserMarkerWidth-browserStatusGap-algorithmWidth)
+		row := markerStyle.Render(marker) +
+			labelStyle.Width(labelWidth).Render(clip(label, labelWidth)) +
+			strings.Repeat(" ", browserStatusGap) +
+			mutedStyle.Width(algorithmWidth).Render(clip(algorithm, algorithmWidth))
+		lines = append(lines, row)
 	}
 	if m.sshKeyCursor >= 0 && m.sshKeyCursor < len(m.sshKeyChoices) {
 		lines = append(lines, mutedStyle.Render("Fingerprint ")+accentStyle.Render(printable(m.sshKeyChoices[m.sshKeyCursor].Fingerprint)))

@@ -720,6 +720,46 @@ func TestTransportChooserUsesAnAlignedChoicePanel(t *testing.T) {
 	}
 }
 
+func TestSelectableRowsShareArrowWithoutBackground(t *testing.T) {
+	item := browserItem{
+		destination: catalog.Destination{Label: "default"},
+		symbol:      "●",
+		state:       "running",
+		stateStyle:  runningStyle,
+	}
+	browserRow := renderBrowserRow(item, true, 48)
+	transportRow := renderTransportOption("Native", "recommended", "Herdr runs inside the Sprite.", true, 48)
+	sshModel := Model{sshKeyChoices: []catalog.SSHIdentity{{Comment: "Work key", Algorithm: "ssh-ed25519"}}, sshKeyCursor: 0}
+	sshRows := sshModel.sshKeyView(48)
+	for name, rendered := range map[string]string{"browser": browserRow, "transport": transportRow, "SSH": sshRows} {
+		if strings.Contains(rendered, "48;5;") {
+			t.Errorf("%s selection still has a background: %q", name, rendered)
+		}
+		if !strings.Contains(rendered, "1;36") {
+			t.Errorf("%s selected label is not bold teal: %q", name, rendered)
+		}
+	}
+	browserPlain := ansi.Strip(browserRow)
+	transportPlain := ansi.Strip(transportRow)
+	sshPlain := ansi.Strip(sshRows)
+	if !strings.HasPrefix(browserPlain, "› default") || !strings.Contains(transportPlain, "│ › Native") || !strings.Contains(sshPlain, "› Work key") {
+		t.Fatalf("selection markers differ:\nbrowser %q\ntransport %q\nSSH %q", browserPlain, transportPlain, sshPlain)
+	}
+	if strings.Contains(transportPlain, "● Native") || strings.Contains(transportPlain, "○ Native") {
+		t.Fatalf("transport focus still uses radio markers: %q", transportPlain)
+	}
+
+	narrow := renderTransportOption("Native", "recommended", "Herdr runs inside the Sprite.", true, 12)
+	for _, line := range strings.Split(narrow, "\n") {
+		if got := lipgloss.Width(line); got > 12 {
+			t.Fatalf("narrow transport row width = %d: %q", got, line)
+		}
+	}
+	if plain := ansi.Strip(narrow); !strings.Contains(plain, "Native") || strings.Contains(plain, "recommended") {
+		t.Fatalf("narrow transport did not preserve the primary label: %q", plain)
+	}
+}
+
 func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
