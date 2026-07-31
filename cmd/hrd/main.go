@@ -117,22 +117,29 @@ func newScreenOutput(output *os.File) *screenOutput {
 	return &screenOutput{File: output}
 }
 
+var heldTerminalSequences = [][]byte{
+	[]byte(ansi.ResetModeAltScreenSaveCursor),
+	[]byte(ansi.SetWindowTitle("")),
+}
+
 func (o *screenOutput) Write(p []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	target := []byte(ansi.ResetModeAltScreenSaveCursor)
 	input := append(append([]byte(nil), o.pending...), p...)
 	o.pending = nil
 	filtered := make([]byte, 0, len(input))
+filter:
 	for len(input) > 0 {
-		if bytes.HasPrefix(input, target) {
-			input = input[len(target):]
-			continue
-		}
-		if len(input) < len(target) && bytes.HasPrefix(target, input) {
-			o.pending = append(o.pending, input...)
-			break
+		for _, target := range heldTerminalSequences {
+			if bytes.HasPrefix(input, target) {
+				input = input[len(target):]
+				continue filter
+			}
+			if len(input) < len(target) && bytes.HasPrefix(target, input) {
+				o.pending = append(o.pending, input...)
+				break filter
+			}
 		}
 		filtered = append(filtered, input[0])
 		input = input[1:]
@@ -148,7 +155,7 @@ func (o *screenOutput) Restore() error {
 	defer o.mu.Unlock()
 	flushErr := writeAll(o.File, o.pending)
 	o.pending = nil
-	_, restoreErr := io.WriteString(o.File, ansi.ShowCursor+ansi.ResetModeAltScreenSaveCursor)
+	_, restoreErr := io.WriteString(o.File, ansi.ShowCursor+ansi.SetWindowTitle("")+ansi.ResetModeAltScreenSaveCursor)
 	return errors.Join(flushErr, restoreErr)
 }
 

@@ -47,7 +47,7 @@ func (m Model) View() tea.View {
 	if m.active == workflowHome && m.home.phase == homeLoading {
 		view := tea.NewView("")
 		view.AltScreen = true
-		view.WindowTitle = "hrd · Herdr sessions"
+		view.WindowTitle = m.windowTitle()
 		return view
 	}
 
@@ -79,8 +79,19 @@ func (m Model) View() tea.View {
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
-	view.WindowTitle = "hrd · Herdr sessions"
+	view.WindowTitle = m.windowTitle()
 	return view
+}
+
+func (m Model) windowTitle() string {
+	parts := []string{"hrd"}
+	if m.showsSprite() {
+		parts = append(parts, m.spriteName())
+	}
+	if m.active == workflowConnection && m.connection.destination.Label != "" {
+		parts = append(parts, printable(m.connection.destination.Label))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (m Model) breadcrumbView() string {

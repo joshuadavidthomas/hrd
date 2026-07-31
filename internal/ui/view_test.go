@@ -253,8 +253,8 @@ func TestTransportChooserUsesAnAlignedChoicePanel(t *testing.T) {
 func TestBreadcrumbsAndEscapeHintsNameTheReturnDestination(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	model := ready(t, ops)
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd" {
-		t.Fatalf("home breadcrumb = %q", breadcrumb)
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd" || model.View().WindowTitle != "hrd" {
+		t.Fatalf("home breadcrumb/title = %q/%q", breadcrumb, model.View().WindowTitle)
 	}
 	model, _ = update(t, model, press("/"))
 	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd" || !strings.Contains(ansi.Strip(model.helpView()), "esc list") {
@@ -274,13 +274,13 @@ func TestBreadcrumbsAndEscapeHintsNameTheReturnDestination(t *testing.T) {
 		t.Fatalf("opening Sprite context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	model, _ = update(t, model, runFirst(t, load))
-	if help := ansi.Strip(model.helpView()); !strings.Contains(help, "esc home") {
-		t.Fatalf("Sprite sessions do not name Escape destination: %q", help)
+	if help := ansi.Strip(model.helpView()); !strings.Contains(help, "esc home") || model.View().WindowTitle != "hrd · devbox" {
+		t.Fatalf("Sprite session help/title = %q/%q", help, model.View().WindowTitle)
 	}
 
 	model, _ = update(t, model, press("enter"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "esc sessions") {
-		t.Fatalf("transport context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / devbox / default" || !strings.Contains(ansi.Strip(model.helpView()), "esc sessions") || model.View().WindowTitle != "hrd · devbox · default" {
+		t.Fatalf("transport context = breadcrumb %q help %q title %q", breadcrumb, ansi.Strip(model.helpView()), model.View().WindowTitle)
 	}
 	narrow := model
 	narrow.width = 40
