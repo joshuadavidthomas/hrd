@@ -206,6 +206,9 @@ func TestRefreshToastDoesNotMoveCenteredContent(t *testing.T) {
 	if !strings.Contains(ansi.Strip(refreshing), "Refreshing local and Sprite inventory") {
 		t.Fatalf("refresh toast missing: %q", refreshing)
 	}
+	if toast := model.toastView(); strings.Contains(toast, "\x1b[48") {
+		t.Fatalf("toast paints over the terminal background: %q", toast)
+	}
 }
 
 func TestShortToastKeepsFailureAheadOfRefreshProgress(t *testing.T) {

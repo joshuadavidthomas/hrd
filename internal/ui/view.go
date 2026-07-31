@@ -174,7 +174,6 @@ func (m Model) toastView() string {
 	toast := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderStyle.GetForeground()).
-		Background(lipgloss.Color("235")).
 		Padding(0, 1).
 		Width(width).
 		Render(strings.Join(messages, "\n"))
@@ -182,7 +181,6 @@ func (m Model) toastView() string {
 		return toast
 	}
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color("235")).
 		Width(max(1, m.width)).
 		Render(clip(messages[0], max(1, m.width)))
 }
