@@ -61,8 +61,8 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 			}
 			if tc.transport == catalog.NativePreview {
 				view := ansi.Strip(model.View().Content)
-				if !strings.Contains(view, "Choose a connection") || !strings.Contains(view, "Preparing native connection") || !strings.Contains(view, ansi.Strip(model.spinner.View())) || strings.Contains(view, "Waking") || strings.Contains(view, "Herdr has the terminal") {
-					t.Fatalf("native preparation feedback = %q", view)
+				if !strings.Contains(view, "Choose a connection") || strings.Contains(view, "Preparing") || strings.Contains(view, "Waking") || strings.Contains(view, "Herdr has the terminal") {
+					t.Fatalf("native preparation changed the chooser: %q", view)
 				}
 			}
 			model, handoff := update(t, model, runFirst(t, prepare))
@@ -74,7 +74,7 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 			}
 			if tc.transport == catalog.NativePreview {
 				view := ansi.Strip(model.View().Content)
-				if !strings.Contains(view, "Choose a connection") || !strings.Contains(view, "Preparing native connection") || strings.Contains(view, "devbox sessions") {
+				if !strings.Contains(view, "Choose a connection") || strings.Contains(view, "Preparing") || strings.Contains(view, "devbox sessions") {
 					t.Fatalf("native handoff changed surfaces: %q", view)
 				}
 				if native != terminal || len(processArgs) != 0 {

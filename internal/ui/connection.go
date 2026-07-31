@@ -102,6 +102,9 @@ func (m Model) updateTransport(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, m.spinner.Tick)
 		}
 		cmd := m.beginPrepareSprite(m.connection.destination, m.connection.transport)
+		if m.connection.transport == catalog.NativePreview {
+			return m, cmd
+		}
 		return m, tea.Batch(cmd, m.spinner.Tick)
 	default:
 		return m, nil
@@ -421,6 +424,9 @@ func (m Model) updateStopDone(msg stopDone) (tea.Model, tea.Cmd) {
 		m.connection.restart = false
 		m.connection.restartStopped = true
 		cmd := m.beginPrepareSprite(m.connection.destination, m.connection.transport)
+		if m.connection.transport == catalog.NativePreview {
+			return m, cmd
+		}
 		return m, tea.Batch(cmd, m.spinner.Tick)
 	}
 	cmd := m.beginSpriteRefresh()
@@ -518,9 +524,6 @@ func (m Model) transportView(width int) string {
 		mutedStyle.Render("Select where Herdr itself should run."),
 		"",
 		panel,
-	}
-	if m.active == workflowConnection && (m.connection.phase == connectionPreparing || m.connection.phase == connectionAttaching) && m.connection.transport == catalog.NativePreview {
-		parts = append(parts, "", m.busyLine("Preparing native connection…", chooserWidth))
 	}
 	content := strings.Join(parts, "\n")
 	return lipgloss.PlaceHorizontal(width, lipgloss.Center, content)

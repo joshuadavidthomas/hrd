@@ -24,7 +24,8 @@ func (m Model) busy() bool {
 	case workflowSessions:
 		return m.sessions.phase == sessionsLoading || m.sessions.phase == sessionsRefreshing || m.sessions.phase == sessionsInstallingHerdr
 	case workflowConnection:
-		return m.connection.phase == connectionStopping || m.connection.phase == connectionPreparing || m.connection.phase == connectionStartingSSHAgent
+		preparingWithFeedback := m.connection.phase == connectionPreparing && (!m.connection.isSprite() || m.connection.transport == catalog.SSHFallback)
+		return m.connection.phase == connectionStopping || preparingWithFeedback || m.connection.phase == connectionStartingSSHAgent
 	default:
 		panic("ui: invalid active workflow")
 	}
