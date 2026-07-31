@@ -1,6 +1,7 @@
 /hrd
 /coverage.out
 /coverage.html
+/dist/
 .idea/
 .vscode/
 .env

@@ -1,0 +1,40 @@
+version: 2
+
+project_name: hrd
+
+builds:
+  - id: hrd
+    main: ./cmd/hrd
+    binary: hrd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/joshuadavidthomas/hrd/internal/version.Version={{ .Tag }}
+
+archives:
+  - id: hrd
+    ids:
+      - hrd
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: true
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

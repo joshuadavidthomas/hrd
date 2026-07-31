@@ -21,12 +21,14 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/sprites"
 	"github.com/joshuadavidthomas/hrd/internal/sshagent"
 	"github.com/joshuadavidthomas/hrd/internal/ui"
+	"github.com/joshuadavidthomas/hrd/internal/version"
 )
 
 const usageText = `hrd — choose a Herdr destination
 
 Usage:
   hrd
+  hrd --version
 
 Run hrd from a terminal outside Herdr; nested launches are rejected.
 
@@ -50,13 +52,17 @@ Keys:
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr *os.File) int {
-	help, err := parseArgs(args)
+	invocation, err := parseArgs(args)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "hrd: %v\nRun 'hrd --help' for usage.\n", err)
 		return 2
 	}
-	if help {
+	switch invocation {
+	case invocationHelp:
 		_, _ = fmt.Fprint(stdout, usageText)
+		return 0
+	case invocationVersion:
+		_, _ = fmt.Fprintln(stdout, version.Version)
 		return 0
 	}
 	if err := validateLaunchEnvironment(os.Getenv); err != nil {
@@ -176,12 +182,25 @@ func validateLaunchEnvironment(getenv func(string) string) error {
 	return nil
 }
 
-func parseArgs(args []string) (bool, error) {
+type invocation uint8
+
+const (
+	invocationRun invocation = iota
+	invocationHelp
+	invocationVersion
+)
+
+func parseArgs(args []string) (invocation, error) {
 	if len(args) == 0 {
-		return false, nil
+		return invocationRun, nil
 	}
-	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		return true, nil
+	if len(args) == 1 {
+		switch args[0] {
+		case "-h", "--help":
+			return invocationHelp, nil
+		case "-v", "--version":
+			return invocationVersion, nil
+		}
 	}
-	return false, fmt.Errorf("unexpected argument %q", args[0])
+	return invocationRun, fmt.Errorf("unexpected argument %q", args[0])
 }

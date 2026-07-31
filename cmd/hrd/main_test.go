@@ -8,15 +8,55 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/joshuadavidthomas/hrd/internal/version"
 )
 
-func TestParseArgsRecognizesHelp(t *testing.T) {
+func TestParseArgsRecognizesHelpAndVersion(t *testing.T) {
 	t.Parallel()
-	for _, argument := range []string{"-h", "--help"} {
-		help, err := parseArgs([]string{argument})
-		if err != nil || !help {
-			t.Errorf("parseArgs(%q) = (%v, %v), want (true, nil)", argument, help, err)
+	for _, test := range []struct {
+		argument string
+		want     invocation
+	}{
+		{argument: "-h", want: invocationHelp},
+		{argument: "--help", want: invocationHelp},
+		{argument: "-v", want: invocationVersion},
+		{argument: "--version", want: invocationVersion},
+	} {
+		got, err := parseArgs([]string{test.argument})
+		if err != nil || got != test.want {
+			t.Errorf("parseArgs(%q) = (%v, %v), want (%v, nil)", test.argument, got, err, test.want)
 		}
+	}
+}
+
+func TestRunPrintsVersion(t *testing.T) {
+	oldVersion := version.Version
+	version.Version = "v1.2.3"
+	t.Cleanup(func() { version.Version = oldVersion })
+	stdout, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stdout.Close() }()
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stderr.Close() }()
+
+	if code := run([]string{"--version"}, stdout, stderr); code != 0 {
+		t.Fatalf("run() code = %d, want 0", code)
+	}
+	if _, err := stdout.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(output), "v1.2.3\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
 
@@ -166,7 +206,7 @@ func TestValidateLaunchEnvironmentAcceptsAnOrdinaryTerminal(t *testing.T) {
 
 func TestUsageExplainsSpriteRequirements(t *testing.T) {
 	t.Parallel()
-	for _, want := range []string{"Usage:", "SPRITE_TOKEN", "Native", "default", "SSH", "1Password", "enter", "session", "restart"} {
+	for _, want := range []string{"Usage:", "--version", "SPRITE_TOKEN", "Native", "default", "SSH", "1Password", "enter", "session", "restart"} {
 		if !strings.Contains(usageText, want) {
 			t.Errorf("usage text does not contain %q", want)
 		}

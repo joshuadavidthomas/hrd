@@ -1,29 +1,72 @@
-name: Check
+name: check
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test -race ./...
+
+  quality:
+    name: Quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version: 1.25.8
-          cache: true
-      - name: Format
-        run: test -z "$(gofmt -l .)"
-      - name: Vet
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
+        with:
+          install_args: golangci-lint
+
+      - name: Check formatting
+        run: |
+          BAD=$(gofmt -l .)
+          if [ -n "$BAD" ]; then
+            echo "Files need formatting:"
+            echo "$BAD"
+            exit 1
+          fi
+
+      - name: Run go vet
         run: go vet ./...
-      - name: Test
-        run: go test -race ./...
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.10.1
+
+      - name: Run golangci-lint
+        run: golangci-lint run
+
+      - name: Check go.mod and go.sum
+        run: go mod tidy -diff
+
       - name: Build
         run: go build ./cmd/hrd

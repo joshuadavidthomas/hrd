@@ -1,6 +1,6 @@
 module github.com/joshuadavidthomas/hrd
 
-go 1.25.8
+go 1.26.5
 
 require (
 	charm.land/bubbles/v2 v2.1.1
