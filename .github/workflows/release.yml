@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -84,6 +84,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/checksums.txt
+            dist/homebrew/Casks/hrd.rb
           if-no-files-found: error
           retention-days: 7
 
@@ -112,3 +113,26 @@ jobs:
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Publish Homebrew cask
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          if [[ "$latest" != "$GITHUB_REF_NAME" ]]; then
+            echo "Skipping Homebrew publication for $GITHUB_REF_NAME; latest release is $latest."
+            exit 0
+          fi
+          endpoint="repos/joshuadavidthomas/homebrew-homebrew/contents/Casks/hrd.rb"
+          sha_args=()
+          if sha="$(gh api --method GET "$endpoint" -f ref=main --jq .sha 2>/dev/null)"; then
+            sha_args=(-f "sha=$sha")
+          fi
+          content="$(base64 -w 0 dist/homebrew/Casks/hrd.rb)"
+          gh api --method PUT "$endpoint" \
+            -f branch=main \
+            "${sha_args[@]}" \
+            -f message="Update hrd cask for ${GITHUB_REF_NAME}" \
+            -f content="$content"

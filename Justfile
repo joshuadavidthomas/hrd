@@ -12,6 +12,10 @@ build *ARGS:
 test *ARGS:
     go test ./... -race {{ ARGS }}
 
+# Run tests with coverage
+coverage *ARGS:
+    go test ./... -race -cover {{ ARGS }}
+
 # Format Go source
 fmt *ARGS='.':
     gofmt -w {{ ARGS }}
@@ -24,9 +28,9 @@ fmt-check:
 vet:
     go vet ./...
 
-# Run golangci-lint
+# Run all pre-commit hooks
 lint:
-    golangci-lint run
+    pre-commit run --all-files
 
 # Check dependencies for known vulnerabilities
 vuln:

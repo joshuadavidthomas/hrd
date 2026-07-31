@@ -1,0 +1,36 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-toml
+      - id: check-yaml
+  - repo: https://github.com/TekWizely/pre-commit-golang
+    rev: f298c082154b2cb239fac06a4f452368e66e66dd # v1.0.0-rc.4
+    hooks:
+      - id: go-fmt
+  - repo: local
+    hooks:
+      - id: golangci-lint
+        name: Lint Go code
+        entry: golangci-lint run
+        language: system
+        types: [go]
+        pass_filenames: false
+  - repo: https://github.com/joshuadavidthomas/gh-actionkit
+    rev: c9384369c3969f58db01dead88494be0427282f2 # v0.5.0
+    hooks:
+      - id: check
+        args:
+          - --require-sha
+          - --fail-on-unknown
+          - --allow-owner
+          - actions
+          - --allow-owner
+          - goreleaser
+          - --allow-owner
+          - jdx
+      - id: lint
+        args: [--pedantic]
+      - id: validate

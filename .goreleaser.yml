@@ -32,6 +32,20 @@ checksum:
 release:
   draft: true
 
+homebrew_casks:
+  - name: hrd
+    ids:
+      - hrd
+    binaries:
+      - hrd
+    repository:
+      owner: joshuadavidthomas
+      name: homebrew-homebrew
+      branch: main
+    skip_upload: true
+    homepage: https://github.com/joshuadavidthomas/hrd
+    description: "Manage local and sandboxed Herdr sessions"
+
 changelog:
   sort: asc
   filters:

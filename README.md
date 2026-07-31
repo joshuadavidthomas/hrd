@@ -13,6 +13,12 @@
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install --cask joshuadavidthomas/homebrew/hrd
+```
+
 ### Release binaries
 
 [GitHub releases](https://github.com/joshuadavidthomas/hrd/releases) provide archives and checksums for Linux and macOS on amd64 and arm64. Download the archive for your system, move `hrd` onto your `PATH`, then check it:
@@ -106,16 +112,23 @@ ctrl+c  quit
 
 ## Development
 
-Install the tools declared in `mise.toml`, then run the CI checks and build local release archives:
+Install the tools declared in `mise.toml`, prepare the hooks, then run the CI checks and build local release archives:
 
 ```sh
 mise install
+pre-commit install --install-hooks
 just check
 ```
 
-The default test suite does not create, wake, stop, or delete Sprites.
+[`prek`](https://prek.j178.dev/) can use the same hook configuration:
 
-See [`docs/releasing.md`](docs/releasing.md) for the release process.
+```sh
+prek install --prepare-hooks
+```
+
+Run `just coverage` for race-enabled test coverage. The default test suite does not create, wake, stop, or delete Sprites.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for notable changes and [`docs/releasing.md`](docs/releasing.md) for the release process.
 
 ## License
 
