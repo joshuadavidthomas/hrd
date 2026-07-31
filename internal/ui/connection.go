@@ -470,7 +470,7 @@ func (m Model) connectionView(width, height int) string {
 		return fitView(m.sshKeyView(width), width, height)
 	case connectionAttaching:
 		if m.connection.isSprite() && m.connection.transport == catalog.NativePreview {
-			return m.listView(width, height)
+			return fitView(m.transportView(width), width, height)
 		}
 		return "Herdr has the terminal."
 	default:
@@ -519,7 +519,7 @@ func (m Model) transportView(width int) string {
 		"",
 		panel,
 	}
-	if m.active == workflowConnection && m.connection.phase == connectionPreparing && m.connection.transport == catalog.NativePreview {
+	if m.active == workflowConnection && (m.connection.phase == connectionPreparing || m.connection.phase == connectionAttaching) && m.connection.transport == catalog.NativePreview {
 		parts = append(parts, "", m.busyLine("Preparing native connection…", chooserWidth))
 	}
 	content := strings.Join(parts, "\n")

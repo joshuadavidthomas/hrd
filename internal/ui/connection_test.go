@@ -73,6 +73,10 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 				t.Fatalf("attach retained current observations = endpoint %v sessions %v", model.home.spriteSnapshot.current, model.sessions.spriteSnapshotDetail.current)
 			}
 			if tc.transport == catalog.NativePreview {
+				view := ansi.Strip(model.View().Content)
+				if !strings.Contains(view, "Choose a connection") || !strings.Contains(view, "Preparing native connection") || strings.Contains(view, "devbox sessions") {
+					t.Fatalf("native handoff changed surfaces: %q", view)
+				}
 				if native != terminal || len(processArgs) != 0 {
 					t.Fatalf("native handoff = %T, process args %#v", native, processArgs)
 				}
