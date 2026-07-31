@@ -1,6 +1,8 @@
 # hrd
 
-`hrd` finds [Herdr](https://herdr.dev) sessions on your machine and in [Sprites](https://sprites.dev), attaches the selected session to your terminal, and reopens the picker when you detach.
+`hrd` manages your herd of sandboxes and the [Herdr](https://herdr.dev) sessions running on them. It gathers local and remote sessions into one terminal picker, hands the terminal to the session you choose, then returns to the herd when you detach.
+
+`hrd` currently supports local Herdr sessions and [Sprites](https://sprites.dev) as its first sandbox provider.
 
 ## Requirements
 
@@ -11,7 +13,7 @@
 
 ## Install
 
-### Install script
+### With the install script
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/joshuadavidthomas/hrd/main/install.sh | sh
@@ -26,13 +28,13 @@ curl -fsSL https://raw.githubusercontent.com/joshuadavidthomas/hrd/main/install.
 
 The script checks the archive checksum. If an authenticated [`gh`](https://cli.github.com/) command is available, it also verifies the archive's build provenance. Set `HRD_REQUIRE_ATTESTATION=1` to stop when provenance verification is unavailable.
 
-### Homebrew
+### With Homebrew
 
 ```sh
 brew install --cask joshuadavidthomas/homebrew/hrd
 ```
 
-### Release binaries
+### From a release archive
 
 [GitHub releases](https://github.com/joshuadavidthomas/hrd/releases) contain archives and checksums for Linux and macOS on amd64 and arm64. Download and extract the archive for your system, move the extracted `hrd` binary to a directory on your `PATH`, then check the install:
 
@@ -40,7 +42,7 @@ brew install --cask joshuadavidthomas/homebrew/hrd
 hrd --version
 ```
 
-### Go install
+### With Go
 
 With Go 1.26.5 or newer:
 
@@ -58,7 +60,9 @@ hrd
 
 Select a local session and press `enter`. The default session runs `herdr`; a named session runs `herdr --session NAME`. Press `ctrl+b q` to detach and return to `hrd`.
 
-## Connect to a Sprite
+## Usage
+
+### Use hrd with Sprites
 
 Create a Sprites API token and export it before starting `hrd`:
 
@@ -73,7 +77,59 @@ Creating or waking a Sprite and running commands can incur Sprites charges. `hrd
 
 `hrd` refreshes the home screen every ten seconds while it is visible. It also preloads Herdr sessions from warm and running Sprites. Press `r` to refresh the current list.
 
-## Configuration reference
+### What hrd changes on a Sprite
+
+#### Herdr installation
+
+When a Sprite lacks Herdr, `hrd` asks for approval. It then downloads <https://herdr.dev/install.sh> over HTTPS to a validated temporary path and runs it with `/bin/sh`.
+
+Herdr publishes no checksum or signature for this installer. Installation trusts the HTTPS connection, its redirects, the script, and any assets the script downloads.
+
+#### Herdr config
+
+With the default `herdr_config_sync = "install"` policy, `hrd` copies your local Herdr config after it installs Herdr. It leaves the remote config unchanged when Herdr was already installed. The `open` policy also copies config when you open an existing Sprite. A failed copy retries during refresh without hiding the Sprite's sessions.
+
+`hrd` reads the local Herdr config from:
+
+| Condition | Path |
+|---|---|
+| `XDG_CONFIG_HOME` is an absolute path | `$XDG_CONFIG_HOME/herdr/config.toml` |
+| Linux | `~/.config/herdr/config.toml` |
+| macOS | `~/Library/Application Support/herdr/config.toml` |
+
+`hrd` copies the file without changing its contents. A setting that names a local executable, such as `terminal.default_shell`, must name an executable that also exists in the Sprite. `hrd` replaces the remote file atomically and sets its mode to `0600`. A missing local file leaves the remote file unchanged.
+
+### Choose a transport
+
+After you select a Sprite session, `hrd` asks how to attach.
+
+- `Native` starts Herdr inside the Sprite through the Sprites terminal API. It needs no SSH key or service. `hrd` sets `SHELL=/bin/bash`; Herdr's `terminal.default_shell` setting takes precedence.
+- `SSH` runs Herdr locally and connects it to the Sprite. Use it when Herdr must run on your machine.
+
+#### SSH keys
+
+`hrd` first checks the OpenSSH-compatible agent named by `SSH_AUTH_SOCK`, then the standard 1Password agent socket on Linux and macOS. It selects the only available key. If the agent holds several keys, `hrd` asks you to choose one and remembers that choice until it exits.
+
+For an empty agent, `hrd` gives the terminal to `ssh-add`. If no usable agent exists, `hrd` starts a private agent before running `ssh-add`.
+
+SSH setup installs OpenSSH when needed, authorizes the selected key for `sprite`, disables password and keyboard-interactive login, and blocks root and other users. A bridge bound to `127.0.0.1` connects local Herdr to the service. `hrd` removes `SPRITE_TOKEN` from child environments and stops any private agent it started when it exits.
+
+### Key bindings
+
+```text
+enter   open a Sprite or attach a session
+n       create a Sprite from the home screen
+s       stop a running Sprite session
+R       restart a running Sprite session
+r       refresh the current screen
+/       filter
+esc     go back or cancel
+?       help
+q       quit when no text field is active
+ctrl+c  quit
+```
+
+## Configuration
 
 `hrd` reads its config from:
 
@@ -97,59 +153,7 @@ herdr_config_sync = "install"
 | `install` | Copy after `hrd` installs Herdr; this is the default |
 | `open` | Copy after installation and whenever you open a Sprite |
 
-## Changes made to a Sprite
-
-### Herdr installation
-
-When a Sprite lacks Herdr, `hrd` asks for approval. It then downloads <https://herdr.dev/install.sh> over HTTPS to a validated temporary path and runs it with `/bin/sh`.
-
-Herdr publishes no checksum or signature for this installer. Installation trusts the HTTPS connection, its redirects, the script, and any assets the script downloads.
-
-### Herdr config
-
-With the default `herdr_config_sync = "install"` policy, `hrd` copies your local Herdr config after it installs Herdr. It leaves the remote config unchanged when Herdr was already installed. The `open` policy also copies config when you open an existing Sprite. A failed copy retries during refresh without hiding the Sprite's sessions.
-
-`hrd` reads the local Herdr config from:
-
-| Condition | Path |
-|---|---|
-| `XDG_CONFIG_HOME` is an absolute path | `$XDG_CONFIG_HOME/herdr/config.toml` |
-| Linux | `~/.config/herdr/config.toml` |
-| macOS | `~/Library/Application Support/herdr/config.toml` |
-
-`hrd` copies the file without changing its contents. A setting that names a local executable, such as `terminal.default_shell`, must name an executable that also exists in the Sprite. `hrd` replaces the remote file atomically and sets its mode to `0600`. A missing local file leaves the remote file unchanged.
-
-## Attachment transports
-
-After you select a Sprite session, `hrd` asks how to attach.
-
-- `Native` starts Herdr inside the Sprite through the Sprites terminal API. It needs no SSH key or service. `hrd` sets `SHELL=/bin/bash`; Herdr's `terminal.default_shell` setting takes precedence.
-- `SSH` runs Herdr locally and connects it to the Sprite. Use it when Herdr must run on your machine.
-
-### SSH keys
-
-`hrd` first checks the OpenSSH-compatible agent named by `SSH_AUTH_SOCK`, then the standard 1Password agent socket on Linux and macOS. It selects the only available key. If the agent holds several keys, `hrd` asks you to choose one and remembers that choice until it exits.
-
-For an empty agent, `hrd` gives the terminal to `ssh-add`. If no usable agent exists, `hrd` starts a private agent before running `ssh-add`.
-
-SSH setup installs OpenSSH when needed, authorizes the selected key for `sprite`, disables password and keyboard-interactive login, and blocks root and other users. A bridge bound to `127.0.0.1` connects local Herdr to the service. `hrd` removes `SPRITE_TOKEN` from child environments and stops any private agent it started when it exits.
-
-## Key bindings
-
-```text
-enter   open a Sprite or attach a session
-n       create a Sprite from the home screen
-s       stop a running Sprite session
-R       restart a running Sprite session
-r       refresh the current screen
-/       filter
-esc     go back or cancel
-?       help
-q       quit when no text field is active
-ctrl+c  quit
-```
-
-## Contributing
+## Development
 
 Install the pinned tools and Git hooks, then run the same checks as CI:
 
@@ -171,4 +175,4 @@ See [`CHANGELOG.md`](CHANGELOG.md) for notable changes and [`docs/releasing.md`]
 
 ## License
 
-`hrd` uses the MIT License. See [`LICENSE`](LICENSE).
+`hrd` is licensed under the MIT license. See [`LICENSE`](LICENSE).
