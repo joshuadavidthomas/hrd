@@ -14,7 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"golang.org/x/term"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
@@ -83,7 +83,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	programOutput := io.Writer(stdout)
 	var screen *screenOutput
-	if term.IsTerminal(int(stdout.Fd())) {
+	if term.IsTerminal(stdout.Fd()) {
 		screen = newScreenOutput(stdout)
 		programOutput = screen
 	}
@@ -101,7 +101,8 @@ func run(args []string, stdout, stderr *os.File) int {
 }
 
 // screenOutput keeps hrd's alternate screen selected while Bubble Tea lends the
-// terminal to Herdr. The final reset bypasses this filter in Restore.
+// terminal to Herdr. It clears Herdr's final frame when either program tries to
+// leave that screen. The final reset bypasses this filter in Restore.
 type screenOutput struct {
 	*os.File
 	mu      sync.Mutex
@@ -128,6 +129,8 @@ func (o *screenOutput) Write(p []byte) (int, error) {
 	for len(input) > 0 {
 		if bytes.HasPrefix(input, target) {
 			input = input[len(target):]
+			filtered = append(filtered, ansi.EraseEntireScreen...)
+			filtered = append(filtered, ansi.CursorHomePosition...)
 			continue
 		}
 		if len(input) < len(target) && bytes.HasPrefix(target, input) {

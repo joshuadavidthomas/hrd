@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -272,6 +273,114 @@ func TestPrepareHerdrExistingExecutableSkipsInstall(t *testing.T) {
 	}
 	if got := runner.specs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareHerdrCopiesLocalConfigAtomically(t *testing.T) {
+	config := []byte("theme = \"catppuccin\"\n")
+	runner := &fakeNativeRunner{run: func(_ context.Context, _ nativeCommandSpec, index int) (string, error) {
+		if index == 3 {
+			return "/home/sprite/.config/herdr/config.toml.tmp.ABC123\n", nil
+		}
+		return "", nil
+	}}
+	client := nativePreparationClient(t, runner)
+	client.readHerdrConfig = func() ([]byte, error) { return config, nil }
+	if err := client.PrepareHerdr(context.Background(), "sprite-one"); err != nil {
+		t.Fatalf("PrepareHerdr() error = %v", err)
+	}
+	const (
+		configDir  = "/home/sprite/.config/herdr"
+		tempPath   = configDir + "/config.toml.tmp.ABC123"
+		configPath = configDir + "/config.toml"
+	)
+	want := []nativeCommandSpec{
+		{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}},
+		{path: nativeExecutable, args: []string{"--version"}},
+		{path: "/usr/bin/install", args: []string{"-d", "-m", "0700", configDir}},
+		{path: "/usr/bin/mktemp", args: []string{configDir + "/config.toml.tmp.XXXXXX"}, outputLimit: nativeOutputMax},
+		{path: "/usr/bin/tee", args: []string{tempPath}, stdin: config},
+		{path: "/bin/chmod", args: []string{"0600", tempPath}},
+		{path: "/bin/mv", args: []string{"-fT", tempPath, configPath}},
+		{path: "/bin/rm", args: []string{"-f", tempPath}},
+	}
+	if got := runner.specs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestSyncHerdrConfigDoesNotInstallOrVerifyHerdr(t *testing.T) {
+	config := []byte("theme = \"catppuccin\"\n")
+	runner := &fakeNativeRunner{run: func(_ context.Context, _ nativeCommandSpec, index int) (string, error) {
+		if index == 1 {
+			return "/home/sprite/.config/herdr/config.toml.tmp.ABC123\n", nil
+		}
+		return "", nil
+	}}
+	client := nativePreparationClient(t, runner)
+	client.readHerdrConfig = func() ([]byte, error) { return config, nil }
+	if err := client.SyncHerdrConfig(context.Background(), "sprite-one"); err != nil {
+		t.Fatalf("SyncHerdrConfig() error = %v", err)
+	}
+	for _, spec := range runner.specs() {
+		if spec.path == nativeExecutable || spec.path == "/usr/bin/curl" || spec.path == "/bin/sh" {
+			t.Fatalf("SyncHerdrConfig() ran Herdr setup command %#v", spec)
+		}
+	}
+}
+
+func TestPrepareHerdrConfigReadFailureStopsBeforeRemoteCommands(t *testing.T) {
+	runner := &fakeNativeRunner{}
+	client := nativePreparationClient(t, runner)
+	client.readHerdrConfig = func() ([]byte, error) { return nil, errors.New("local read failed") }
+	if err := client.PrepareHerdr(context.Background(), "sprite-one"); err == nil {
+		t.Fatal("PrepareHerdr() succeeded, want config read failure")
+	}
+	if got := runner.specs(); len(got) != 0 {
+		t.Fatalf("commands = %#v, want none", got)
+	}
+}
+
+func TestReadLocalHerdrConfig(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if config, err := readLocalHerdrConfig(); err != nil || config != nil {
+		t.Fatalf("readLocalHerdrConfig() = (%q, %v), want absent config", config, err)
+	}
+	configDir := filepath.Join(configHome, "herdr")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("theme = \"catppuccin\"\n")
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readLocalHerdrConfig()
+	if err != nil {
+		t.Fatalf("readLocalHerdrConfig() error = %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("readLocalHerdrConfig() = %q, want %q", got, want)
+	}
+
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(configPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLocalHerdrConfig(); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("readLocalHerdrConfig() directory error = %v, want regular-file failure", err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, bytes.Repeat([]byte{'x'}, localHerdrConfigMax+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLocalHerdrConfig(); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("readLocalHerdrConfig() oversized error = %v, want size failure", err)
 	}
 }
 

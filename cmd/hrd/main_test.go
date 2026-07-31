@@ -90,7 +90,7 @@ func TestScreenOutputFiltersOnlyAlternateScreenResetAcrossSplitWrites(t *testing
 				}
 				forwarded := tc.sequence
 				if tc.filtered {
-					forwarded = ""
+					forwarded = ansi.EraseEntireScreen + ansi.CursorHomePosition
 				}
 				want := "before" + forwarded + "after" + ansi.ShowCursor + ansi.ResetModeAltScreenSaveCursor
 				if string(got) != want {
@@ -133,6 +133,13 @@ func TestScreenOutputKeepsShellHiddenThroughAttachAndDetach(t *testing.T) {
 	}
 	if count := strings.Count(string(got), ansi.ResetModeAltScreenSaveCursor); count != 1 {
 		t.Fatalf("alternate-screen resets = %d, want only final restore: %q", count, got)
+	}
+	clear := ansi.EraseEntireScreen + ansi.CursorHomePosition
+	if count := strings.Count(string(got), clear); count != 2 {
+		t.Fatalf("alternate-screen clears = %d, want one per filtered reset: %q", count, got)
+	}
+	if !strings.Contains(string(got), "remote"+clear) {
+		t.Fatalf("remote final frame was not cleared before picker restore: %q", got)
 	}
 	if count := strings.Count(string(got), ansi.SetWindowTitle("")); count != 2 {
 		t.Fatalf("forwarded window-title resets = %d, want 2: %q", count, got)

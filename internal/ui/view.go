@@ -47,18 +47,17 @@ func (m Model) View() tea.View {
 	if m.active == workflowHome && m.home.phase == homeLoading {
 		view := tea.NewView("")
 		view.AltScreen = true
+		view.BackgroundColor = m.background
 		view.WindowTitle = m.windowTitle()
 		return view
 	}
 
 	surfaceWidth := m.surfaceWidth()
-	m.help.SetWidth(surfaceWidth)
 
 	lines := []string{m.breadcrumbView()}
 
 	footer := m.helpView()
-	footerHeight := lipgloss.Height(footer)
-	bodyBudget := max(1, m.height-len(lines)-footerHeight-3)
+	bodyBudget := m.bodyHeight()
 	if body := m.bodyView(surfaceWidth, bodyBudget); body != "" {
 		lines = append(lines, "", body)
 	}
@@ -79,8 +78,13 @@ func (m Model) View() tea.View {
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
+	view.BackgroundColor = m.background
 	view.WindowTitle = m.windowTitle()
 	return view
+}
+
+func (m Model) bodyHeight() int {
+	return max(1, m.height-lipgloss.Height(m.helpView())-4)
 }
 
 func (m Model) windowTitle() string {
@@ -219,67 +223,17 @@ func (m Model) listView(width, height int) string {
 		filter = "Filter  " + m.browser.FilterInput.View()
 	}
 	visible := m.browser.VisibleItems()
-	selected := m.browser.Index()
-	panelCount := 1
-	if !m.showsSprite() {
-		panelCount = 0
-		hasLocal := m.browser.FilterState() == list.Unfiltered && m.home.localSnapshot.loaded
-		hasSprites := m.browser.FilterState() == list.Unfiltered && m.home.spriteSnapshot.loaded
-		for _, raw := range visible {
-			item, ok := raw.(browserItem)
-			if !ok {
-				continue
-			}
-			switch item.destination.Endpoint.(type) {
-			case catalog.LocalEndpoint:
-				hasLocal = true
-			case catalog.SpriteEndpoint:
-				hasSprites = true
-			}
-		}
-		if hasLocal {
-			panelCount++
-		}
-		if hasSprites {
-			panelCount++
-		}
-	}
-	layoutOverhead := func(showPage bool) int {
-		parts := panelCount
-		overhead := panelCount * 2
-		if filter != "" {
-			parts++
-			overhead++
-		}
-		if showPage {
-			parts++
-			overhead++
-		}
-		return overhead + max(0, parts-1)
-	}
-	maxRows := max(1, height-layoutOverhead(false))
-	if len(visible) > maxRows {
-		maxRows = max(1, height-layoutOverhead(true))
-	}
-	start := 0
-	if len(visible) > maxRows {
-		start = max(0, min(selected-maxRows/2, len(visible)-maxRows))
-	}
-	end := min(len(visible), start+maxRows)
+	start, end := m.browser.Paginator.GetSliceBounds(len(visible))
 
-	type indexedItem struct {
-		item  browserItem
-		index int
-	}
-	local := make([]indexedItem, 0)
-	sprites := make([]indexedItem, 0)
-	sessions := make([]indexedItem, 0)
+	local := make([]browserEntry, 0)
+	sprites := make([]browserEntry, 0)
+	sessions := make([]browserEntry, 0)
 	for index := start; index < end; index++ {
 		item, ok := visible[index].(browserItem)
 		if !ok {
 			continue
 		}
-		entry := indexedItem{item: item, index: index}
+		entry := browserEntry{item: item, index: index}
 		switch item.destination.Endpoint.(type) {
 		case catalog.LocalEndpoint:
 			local = append(local, entry)
@@ -292,76 +246,63 @@ func (m Model) listView(width, height int) string {
 		}
 	}
 
-	renderEntries := func(entries []indexedItem) []renderedBrowserItem {
-		rows := make([]renderedBrowserItem, len(entries))
-		for i, entry := range entries {
-			rows[i] = renderedBrowserItem{item: entry.item, selected: entry.index == selected}
-		}
-		return rows
-	}
 	parts := make([]string, 0, 4)
 	if filter != "" {
 		parts = append(parts, centerPanel(lipgloss.NewStyle().Width(panelWidth).Render(clip(filter, panelWidth))))
 	}
 	if m.showsSprite() {
 		badge := fmt.Sprintf("%d", len(m.sessions.spriteSnapshotDetail.rows))
-		parts = append(parts, centerPanel(renderBrowserPanel(m.spriteName()+" sessions", badge, renderEntries(sessions), panelWidth, "No Herdr sessions found.")))
+		parts = append(parts, centerPanel(m.browserSection(m.spriteName()+" sessions", badge, sessions, panelWidth, "No Herdr sessions found.")))
 	} else {
 		if len(local) > 0 || (m.browser.FilterState() == list.Unfiltered && m.home.localSnapshot.loaded) {
 			badge := fmt.Sprintf("%d", len(m.home.localSnapshot.rows))
-			if !m.home.localSnapshot.current {
+			if m.home.localSnapshot.refreshFailed {
 				badge = "refresh failed · " + badge
 			}
-			parts = append(parts, centerPanel(renderBrowserPanel("Local sessions", badge, renderEntries(local), panelWidth, "No local sessions.")))
+			parts = append(parts, centerPanel(m.browserSection("Local sessions", badge, local, panelWidth, "No local sessions.")))
 		}
 		if len(sprites) > 0 || (m.browser.FilterState() == list.Unfiltered && m.home.spriteSnapshot.loaded) {
 			badge := fmt.Sprintf("%d", len(m.home.spriteSnapshot.rows))
-			if !m.home.spriteSnapshot.current {
+			if m.home.spriteSnapshot.refreshFailed {
 				badge = "refresh failed · " + badge
 			}
-			parts = append(parts, centerPanel(renderBrowserPanel("Sprites", badge, renderEntries(sprites), panelWidth, "No Sprites.")))
+			parts = append(parts, centerPanel(m.browserSection("Sprites", badge, sprites, panelWidth, "No Sprites.")))
 		}
-	}
-	if start > 0 || end < len(visible) {
-		page := lipgloss.NewStyle().Width(panelWidth).Render(mutedStyle.Render(fmt.Sprintf("Showing %d–%d of %d", start+1, end, len(visible))))
-		parts = append(parts, centerPanel(page))
 	}
 	return fitView(strings.Join(parts, "\n\n"), width, height)
 }
 
-type renderedBrowserItem struct {
-	item     browserItem
-	selected bool
+type browserEntry struct {
+	item  browserItem
+	index int
 }
 
-func renderBrowserPanel(title, badge string, rows []renderedBrowserItem, width int, empty string) string {
-	width = max(12, width)
-	innerWidth := width - 2
-	badgeText := ""
-	if badge != "" {
-		badgeText = " " + printable(badge) + " "
-	}
-	maxTitleWidth := max(1, width-lipgloss.Width(badgeText)-7)
-	titleText := " " + clip(printable(title), maxTitleWidth) + " "
-	fill := max(1, innerWidth-lipgloss.Width(titleText)-lipgloss.Width(badgeText)-2)
-	top := borderStyle.Render("╭─") + titleStyle.Render(titleText) + borderStyle.Render(strings.Repeat("─", fill))
-	if badgeText != "" {
-		top += mutedStyle.Render(badgeText)
-	}
-	top += borderStyle.Render("─╮")
-
-	body := make([]string, 0, max(1, len(rows)))
-	if len(rows) == 0 {
-		line := mutedStyle.Render(empty)
-		body = append(body, borderStyle.Render("│")+" "+lipgloss.NewStyle().Width(innerWidth-2).Render(line)+" "+borderStyle.Render("│"))
-	} else {
-		for _, row := range rows {
-			line := renderBrowserRow(row.item, row.selected, innerWidth-2)
-			body = append(body, borderStyle.Render("│")+" "+lipgloss.NewStyle().Width(innerWidth-2).Render(line)+" "+borderStyle.Render("│"))
+func (m Model) browserSection(title, badge string, entries []browserEntry, width int, empty string) string {
+	items := make([]list.Item, len(entries))
+	selected := -1
+	for index, entry := range entries {
+		items[index] = entry.item
+		if entry.index == m.browser.Index() {
+			selected = index
 		}
 	}
-	bottom := borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯")
-	return strings.Join(append(append([]string{top}, body...), bottom), "\n")
+
+	section := newBrowserList(max(1, width-2), max(1, len(entries)+1), m.isDark)
+	section.SetShowTitle(true)
+	section.Styles.TitleBar = lipgloss.NewStyle()
+	section.SetShowFilter(false)
+	section.SetShowPagination(false)
+	section.SetShowHelp(false)
+	section.SetDelegate(browserSectionDelegate{selectedIndex: selected})
+	section.Styles.NoItems = mutedStyle.SetString(empty)
+	section.Title = title + "  " + printable(badge)
+	section.SetItems(items)
+	section.Select(max(0, selected))
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderStyle.GetForeground()).
+		Width(width).
+		Render(section.View())
 }
 
 func (m Model) helpView() string {

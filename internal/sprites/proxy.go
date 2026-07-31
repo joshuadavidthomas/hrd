@@ -23,8 +23,9 @@ const (
 )
 
 // DialProxy opens a connection to the SSH port of spriteName through the
-// Sprites proxy endpoint. The context governs both the WebSocket upgrade and
-// the proxy protocol handshake.
+// Sprites proxy endpoint. This stays local because the SDK does not close an
+// in-progress proxy WebSocket when its context is canceled. The context governs
+// both the WebSocket upgrade and the proxy protocol handshake.
 func DialProxy(ctx context.Context, token, spriteName string) (net.Conn, error) {
 	dialer := &websocket.Dialer{
 		ReadBufferSize:  proxyBufferSize,

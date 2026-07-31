@@ -3,6 +3,7 @@ package ui
 
 import (
 	"context"
+	"image/color"
 	"os/exec"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
@@ -42,6 +42,7 @@ type spriteOperations interface {
 	Create(context.Context, string) spriteapi.CreateResult
 	ListSpriteSessions(context.Context, catalog.SpriteEndpointSelection) ([]catalog.Destination, error)
 	InstallSpriteHerdr(context.Context, catalog.SpriteEndpointSelection) error
+	SyncSpriteHerdrConfig(context.Context, catalog.SpriteEndpointSelection) error
 	StopSpriteSession(context.Context, catalog.SpriteSessionSelection) error
 	PrepareSprite(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport) (catalog.PreparedAttach, error)
 	SSHAddCommand(context.Context) (*exec.Cmd, error)
@@ -92,9 +93,10 @@ const (
 )
 
 type sourceSnapshot struct {
-	rows    []catalog.Destination
-	loaded  bool
-	current bool
+	rows          []catalog.Destination
+	loaded        bool
+	current       bool
+	refreshFailed bool
 }
 
 type operationState struct {
@@ -141,10 +143,15 @@ type Model struct {
 	width  int
 	height int
 
-	browser   list.Model
-	spinner   spinner.Model
-	help      help.Model
-	nameInput textinput.Model
+	browser         list.Model
+	transportPicker list.Model
+	sshKeyPicker    list.Model
+	spinner         spinner.Model
+	help            help.Model
+	nameInput       textinput.Model
+
+	background color.Color
+	isDark     bool
 
 	operation  operationState
 	initialCmd tea.Cmd
@@ -168,26 +175,17 @@ func New(root context.Context, operations Operations) Model {
 		panic("ui: nil operations")
 	}
 
-	browser := list.New(nil, browserDelegate{}, defaultWidth-6, 12)
+	browser := newBrowserList(defaultWidth-6, 12, true)
 	browser.SetShowTitle(false)
-	browser.SetShowStatusBar(false)
-	browser.SetShowPagination(true)
-	browser.SetShowHelp(false)
-	browser.SetShowFilter(true)
-	browser.DisableQuitKeybindings()
-	browser.KeyMap.Quit.SetEnabled(false)
-	browser.KeyMap.ForceQuit.SetEnabled(false)
+	browser.SetShowPagination(false)
+	transportPicker := newPickerList(transportItems(), transportDelegate{}, 66, 4, true)
+	transportPicker.SetShowPagination(false)
+	transportPicker.InfiniteScrolling = true
+	sshKeyPicker := newPickerList(nil, sshKeyDelegate{}, defaultWidth-8, 4, true)
+	sshKeyPicker.SetShowPagination(false)
 
 	spin := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(accentStyle))
 	helpModel := help.New()
-	helpStyles := help.DefaultDarkStyles()
-	helpStyles.ShortKey = accentStyle.Bold(true)
-	helpStyles.ShortDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	helpStyles.ShortSeparator = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	helpStyles.FullKey = helpStyles.ShortKey
-	helpStyles.FullDesc = helpStyles.ShortDesc
-	helpStyles.FullSeparator = helpStyles.ShortSeparator
-	helpModel.Styles = helpStyles
 	name := textinput.New()
 	name.Prompt = ""
 	name.Placeholder = "lowercase-name"
@@ -196,27 +194,31 @@ func New(root context.Context, operations Operations) Model {
 	name.SetVirtualCursor(true)
 
 	m := Model{
-		root:        root,
-		operations:  operations,
-		execProcess: tea.ExecProcess,
-		execCommand: tea.Exec,
-		keys:        newKeyMap(),
-		active:      workflowHome,
-		width:       defaultWidth,
-		height:      defaultHeight,
-		browser:     browser,
-		spinner:     spin,
-		help:        helpModel,
-		nameInput:   name,
+		root:            root,
+		operations:      operations,
+		execProcess:     tea.ExecProcess,
+		execCommand:     tea.Exec,
+		keys:            newKeyMap(),
+		active:          workflowHome,
+		width:           defaultWidth,
+		height:          defaultHeight,
+		browser:         browser,
+		transportPicker: transportPicker,
+		sshKeyPicker:    sshKeyPicker,
+		spinner:         spin,
+		help:            helpModel,
+		nameInput:       name,
+		isDark:          true,
 	}
 	m.home.phase = homeLoading
+	m.applyTheme()
 	m.initialCmd = m.beginInventory()
 	return m
 }
 
 // Init starts inventory loading and silent background refresh.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.initialCmd, scheduleRefresh())
+	return tea.Batch(m.initialCmd, scheduleRefresh(), tea.RequestBackgroundColor)
 }
 
 func (m Model) showsSprite() bool {
@@ -273,6 +275,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = max(1, msg.Height)
 		m.resizeComponents()
 		return m, nil
+	case tea.BackgroundColorMsg:
+		m.background = msg.Color
+		m.isDark = msg.IsDark()
+		m.applyTheme()
+		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -327,6 +334,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.ready() && key.Matches(msg, m.keys.help) && !m.browser.SettingFilter() {
 		m.showHelp = !m.showHelp
 		m.help.ShowAll = m.showHelp
+		m.resizeComponents()
 		return m, nil
 	}
 

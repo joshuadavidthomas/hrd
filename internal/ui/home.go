@@ -104,18 +104,17 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.sessions.open(destination, selection)
 			m.home.invalidateSprites()
-			if cached, ok := m.sessions.cached(destination.ID); ok && eagerSprite(destination) {
-				if cached.err == nil || errors.Is(cached.err, catalog.ErrSpriteHerdrMissing) {
-					m.cancelSessionPrefetch()
-					m.applySpriteSessions(cached, false, "")
-					return m, nil
+			var cached *cachedSpriteSessions
+			if result, ok := m.sessions.cached(destination.ID); ok && eagerSprite(destination) {
+				if result.err == nil || errors.Is(result.err, catalog.ErrSpriteHerdrMissing) {
+					cached = &result
 				}
 				delete(m.sessions.cache, destination.ID)
 			}
 			m.cancelSessionPrefetch()
 			m.showHome(homeOpeningSprite)
 			m.sessions.phase = sessionsLoading
-			return m, tea.Batch(m.beginSpriteSessions(), m.spinner.Tick)
+			return m, tea.Batch(m.beginSpriteSessions(true, cached), m.spinner.Tick)
 		}
 		return m, tea.Batch(m.beginPrepareLocal(destination), m.spinner.Tick)
 	}
@@ -188,6 +187,7 @@ func refreshSnapshot(previous sourceSnapshot, result catalog.SourceResult) sourc
 	}
 	if result.Err != nil {
 		previous.current = false
+		previous.refreshFailed = true
 		return previous
 	}
 	return sourceSnapshot{rows: append([]catalog.Destination(nil), result.Rows...), loaded: true, current: true}

@@ -327,6 +327,7 @@ func PrepareSpriteSSH(name, session string, prepared spriteapi.Prepared) (Prepar
 type spriteOperationBackend interface {
 	HerdrInstalled(context.Context, string) (bool, error)
 	PrepareHerdr(context.Context, string) error
+	SyncHerdrConfig(context.Context, string) error
 	ListHerdrSessions(context.Context, string) ([]herdr.Session, error)
 	StopHerdrSession(context.Context, string, string) error
 	PrepareNative(context.Context, string, string) (*spriteapi.NativeCommand, error)
@@ -483,6 +484,19 @@ func (o *SpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint Spri
 		return err
 	}
 	return backend.PrepareHerdr(ctx, endpoint.name)
+}
+
+// SyncSpriteHerdrConfig copies local config to an existing Sprite without
+// installing Herdr.
+func (o *SpriteOperations) SyncSpriteHerdrConfig(ctx context.Context, endpoint SpriteEndpointSelection) error {
+	if err := endpoint.validate(); err != nil {
+		return err
+	}
+	backend, err := o.operationBackend()
+	if err != nil {
+		return err
+	}
+	return backend.SyncHerdrConfig(ctx, endpoint.name)
 }
 
 // StopSpriteSession stops the selected remote Herdr session.

@@ -42,7 +42,11 @@ explicitly and show progress.
 When Herdr is absent, `hrd` asks before it downloads
 <https://herdr.dev/install.sh> to a validated temporary path, runs that file
 with `/bin/sh`, removes it, and checks that `herdr --version` runs. Opening a
-Sprite never runs the installer without that confirmation.
+Sprite never runs the installer without that confirmation. Setup copies the
+local `~/.config/herdr/config.toml` to the Sprite and replaces the remote file
+atomically. Opening a Sprite that already has Herdr syncs the same file once;
+background inventory refreshes do not rewrite it. If the local file does not
+exist, the Sprite config stays unchanged.
 Herdr publishes no checksum or signature manifest for this installer. HTTPS,
 its redirects, the downloaded script, and the asset URLs chosen by that script
 form the trust boundary. The installer is the launcher's sole shell use; no user

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
@@ -32,14 +33,73 @@ func TestWarmSpritesPrefetchSessionsAndOpenFromCache(t *testing.T) {
 			}
 			model.browser.Select(2)
 			model, load := update(t, model, press("enter"))
-			if load != nil || model.active != workflowSessions || !model.ready() || len(model.browser.Items()) != 2 {
-				t.Fatalf("cached open = active %v ready %v items %d cmd %v", model.active, model.ready(), len(model.browser.Items()), load)
+			if load == nil || model.active != workflowHome || model.home.phase != homeOpeningSprite {
+				t.Fatalf("cached open start = active %v phase %v cmd %v", model.active, model.home.phase, load)
+			}
+			model, _ = update(t, model, runFirst(t, load))
+			if model.active != workflowSessions || !model.ready() || len(model.browser.Items()) != 2 || ops.listSpriteCalls.Load() != 1 || ops.syncConfigCalls.Load() != 1 {
+				t.Fatalf("cached open = active %v ready %v items %d list/sync %d/%d", model.active, model.ready(), len(model.browser.Items()), ops.listSpriteCalls.Load(), ops.syncConfigCalls.Load())
 			}
 			model.sessions.invalidate()
 			if _, cached := model.sessions.cached(model.sessions.spriteEndpoint.ID); cached {
 				t.Fatal("invalidated session observation remained cached")
 			}
 		})
+	}
+}
+
+func TestWarmSessionPrefetchBatchesTargets(t *testing.T) {
+	alpha := spriteEndpointRows("alpha", sprites.Running)[0]
+	beta := spriteEndpointRows("beta", sprites.Warm)[0]
+	alphaSelection, err := catalog.SelectSpriteEndpoint(alpha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(context.Context, int) catalog.Inventory {
+		return catalog.Inventory{
+			Local:   catalog.SourceResult{Rows: localRows()},
+			Sprites: catalog.SourceResult{Rows: []catalog.Destination{alpha, beta}},
+		}
+	}
+	ops.listSpriteFn = func(_ context.Context, selection catalog.SpriteEndpointSelection, _ int) ([]catalog.Destination, error) {
+		if reflect.DeepEqual(selection, alphaSelection) {
+			return spriteSessionRows("alpha", sprites.Running), nil
+		}
+		return spriteSessionRows("beta", sprites.Warm), nil
+	}
+
+	model := New(context.Background(), ops)
+	model, prefetch := update(t, model, run(t, model.initialCmd))
+	batchMsg := run(t, prefetch)
+	batch, ok := batchMsg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("prefetch batch = %T with %d commands", batchMsg, len(batch))
+	}
+	if model.sessions.prefetchRemaining != 2 || model.sessions.prefetchCancel == nil {
+		t.Fatalf("started prefetch = remaining %d cancel %v", model.sessions.prefetchRemaining, model.sessions.prefetchCancel != nil)
+	}
+
+	model, _ = update(t, model, run(t, batch[0]))
+	if _, cached := model.sessions.cached(alpha.ID); !cached {
+		t.Fatal("first target was not cached")
+	}
+	if _, cached := model.sessions.cached(beta.ID); cached {
+		t.Fatal("second target was cached before its command completed")
+	}
+	if model.sessions.prefetchRemaining != 1 || model.sessions.prefetchCancel == nil {
+		t.Fatalf("partial prefetch = remaining %d cancel %v", model.sessions.prefetchRemaining, model.sessions.prefetchCancel != nil)
+	}
+
+	model, _ = update(t, model, run(t, batch[1]))
+	if _, cached := model.sessions.cached(beta.ID); !cached {
+		t.Fatal("second target was not cached")
+	}
+	if model.sessions.prefetchRemaining != 0 || model.sessions.prefetchCancel != nil {
+		t.Fatalf("completed prefetch = remaining %d cancel %v", model.sessions.prefetchRemaining, model.sessions.prefetchCancel != nil)
+	}
+	if ops.listSpriteCalls.Load() != 2 {
+		t.Fatalf("prefetch calls = %d", ops.listSpriteCalls.Load())
 	}
 }
 
@@ -166,6 +226,9 @@ func TestSpriteRefreshPreservesAppliedFilter(t *testing.T) {
 
 	model, refresh := update(t, model, press("r"))
 	model, _ = update(t, model, runFirst(t, refresh))
+	if ops.syncConfigCalls.Load() != 1 {
+		t.Fatalf("Sprite refresh config sync calls = %d, want initial open only", ops.syncConfigCalls.Load())
+	}
 	if model.browser.FilterValue() != "work" || len(model.browser.VisibleItems()) != 1 || selected(t, model).Label != "work" {
 		t.Fatalf("filter after Sprite refresh = %q with %d items, selection %q", model.browser.FilterValue(), len(model.browser.VisibleItems()), selected(t, model).Label)
 	}
@@ -188,14 +251,71 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 	if strings.Contains(loadingView, "devbox sessions\n") {
 		t.Errorf("opening Home rendered the Sprite session panel: %q", loadingView)
 	}
+	if strings.Contains(loadingView, "refresh failed") {
+		t.Errorf("opening a Sprite was shown as a failed refresh: %q", loadingView)
+	}
 	model, _ = update(t, model, runFirst(t, load))
-	if !model.ready() || len(model.browser.Items()) != 2 || ops.listSpriteCalls.Load() != 1 || ops.prepareSpriteCalls.Load() != 0 {
-		t.Fatalf("detail state/items/list/prepare = %v/%d/%d/%d", model.active, len(model.browser.Items()), ops.listSpriteCalls.Load(), ops.prepareSpriteCalls.Load())
+	if !model.ready() || len(model.browser.Items()) != 2 || ops.listSpriteCalls.Load() != 1 || ops.syncConfigCalls.Load() != 1 || ops.prepareSpriteCalls.Load() != 0 {
+		t.Fatalf("detail state/items/list/sync/prepare = %v/%d/%d/%d/%d", model.active, len(model.browser.Items()), ops.listSpriteCalls.Load(), ops.syncConfigCalls.Load(), ops.prepareSpriteCalls.Load())
 	}
 	for _, want := range []string{"default", "running", "work", "stopped"} {
 		if !strings.Contains(model.View().Content, want) {
 			t.Errorf("detail view lacks %q: %q", want, model.View().Content)
 		}
+	}
+}
+
+func TestSpriteOpenRetriesPendingConfigSyncAfterFailure(t *testing.T) {
+	tests := []struct {
+		name          string
+		wantSyncCalls int32
+		ops           func() *fakeSpriteOperations
+	}{
+		{
+			name:          "session list failure",
+			wantSyncCalls: 1,
+			ops: func() *fakeSpriteOperations {
+				ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+				ops.listSpriteFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, call int) ([]catalog.Destination, error) {
+					if call == 1 {
+						return nil, errors.New("list failed")
+					}
+					return spriteSessionRows("devbox", sprites.Running), nil
+				}
+				return ops
+			},
+		},
+		{
+			name:          "config sync failure",
+			wantSyncCalls: 2,
+			ops: func() *fakeSpriteOperations {
+				ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+				ops.syncConfigFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, call int) error {
+					if call == 1 {
+						return errors.New("sync failed")
+					}
+					return nil
+				}
+				return ops
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ops := test.ops()
+			model := ready(t, ops)
+			model.browser.Select(2)
+			model, open := update(t, model, press("enter"))
+			model, _ = update(t, model, runFirst(t, open))
+			if !model.sessions.configSyncPending || model.active != workflowSessions {
+				t.Fatalf("failed open = pending %v active %v", model.sessions.configSyncPending, model.active)
+			}
+			model, refresh := update(t, model, press("r"))
+			model, _ = update(t, model, runFirst(t, refresh))
+			if model.sessions.configSyncPending || !model.ready() || ops.syncConfigCalls.Load() != test.wantSyncCalls {
+				t.Fatalf("retry = pending %v ready %v sync calls %d", model.sessions.configSyncPending, model.ready(), ops.syncConfigCalls.Load())
+			}
+		})
 	}
 }
 
@@ -231,8 +351,12 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 
 	model.browser.Select(2)
 	model, load = update(t, model, press("enter"))
-	if load != nil || model.sessions.phase != sessionsConfirmingInstall {
-		t.Fatalf("cached missing-Herdr result = phase %v cmd %v", model.sessions.phase, load)
+	if load == nil || model.sessions.phase != sessionsLoading {
+		t.Fatalf("cached missing-Herdr start = phase %v cmd %v", model.sessions.phase, load)
+	}
+	model, _ = update(t, model, runFirst(t, load))
+	if model.sessions.phase != sessionsConfirmingInstall || ops.syncConfigCalls.Load() != 0 {
+		t.Fatalf("cached missing-Herdr result = phase %v sync calls %d", model.sessions.phase, ops.syncConfigCalls.Load())
 	}
 	model, install := update(t, model, press("y"))
 	if model.sessions.phase != sessionsInstallingHerdr || install == nil || ops.installCalls.Load() != 0 {

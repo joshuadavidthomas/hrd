@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -48,8 +49,6 @@ type connectionState struct {
 	transport        catalog.SpriteTransport
 	sshRecoveryTried bool
 	sshKeySource     string
-	sshKeyChoices    []catalog.SSHIdentity
-	sshKeyCursor     int
 }
 
 func (c connectionState) isSprite() bool {
@@ -85,13 +84,6 @@ func (m Model) updateConnectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateTransport(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "up", "down", "j", "k":
-		if m.connection.transport == catalog.NativePreview {
-			m.connection.transport = catalog.SSHFallback
-		} else {
-			m.connection.transport = catalog.NativePreview
-		}
-		return m, nil
 	case "esc":
 		m.connection.restart = false
 		m.showReady()
@@ -106,16 +98,20 @@ func (m Model) updateTransport(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, tea.Batch(cmd, m.spinner.Tick)
-	default:
-		return m, nil
 	}
+	var cmd tea.Cmd
+	m.transportPicker, cmd = m.transportPicker.Update(msg)
+	if selected, ok := m.transportPicker.SelectedItem().(transportItem); ok {
+		m.connection.transport = selected.transport
+	}
+	return m, cmd
 }
 
 func (m Model) updateStopConfirmation(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
 		if m.connection.restart {
-			m.connection.transport = catalog.NativePreview
+			m.selectTransport(catalog.NativePreview)
 			m.showConnection(connectionChoosingTransport)
 			return m, nil
 		}
@@ -140,8 +136,7 @@ func (m Model) updatePrepareDone(msg prepareDone) (tea.Model, tea.Cmd) {
 			if source, choices, ok := catalog.SSHKeyChoices(msg.err); ok {
 				m.showConnection(connectionChoosingSSHKey)
 				m.connection.sshKeySource = printable(source)
-				m.connection.sshKeyChoices = append([]catalog.SSHIdentity(nil), choices...)
-				m.connection.sshKeyCursor = 0
+				m.setSSHKeyChoices(choices)
 				return m, nil
 			}
 			if catalog.NeedsSSHKey(msg.err) && !m.connection.sshRecoveryTried {
@@ -233,15 +228,12 @@ func (m Model) updateSSHAddDone(msg sshAddDone) (tea.Model, tea.Cmd) {
 
 func (m Model) updateSSHKeyChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "up", "k":
-		m.connection.sshKeyCursor = max(0, m.connection.sshKeyCursor-1)
-	case "down", "j":
-		m.connection.sshKeyCursor = min(max(0, len(m.connection.sshKeyChoices)-1), m.connection.sshKeyCursor+1)
 	case "esc":
-		m.connection.sshKeyChoices = nil
+		m.sshKeyPicker.SetItems(nil)
 		return m, m.finishConnectionAttempt()
 	case "enter":
-		if m.connection.sshKeyCursor < 0 || m.connection.sshKeyCursor >= len(m.connection.sshKeyChoices) {
+		selected, ok := m.sshKeyPicker.SelectedItem().(sshKeyItem)
+		if !ok {
 			return m, nil
 		}
 		operations, ok := m.operations.(spriteOperations)
@@ -249,15 +241,38 @@ func (m Model) updateSSHKeyChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.notice = "Couldn’t select an SSH key."
 			return m, nil
 		}
-		if err := operations.SelectSSHKey(m.connection.sshKeyChoices[m.connection.sshKeyCursor].Fingerprint); err != nil {
+		if err := operations.SelectSSHKey(selected.identity.Fingerprint); err != nil {
 			m.notice = "Couldn’t select SSH key: " + printable(err.Error())
 			return m, nil
 		}
-		m.connection.sshKeyChoices = nil
+		m.sshKeyPicker.SetItems(nil)
 		cmd := m.retrySpritePrepare()
 		return m, tea.Batch(cmd, m.spinner.Tick)
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.sshKeyPicker, cmd = m.sshKeyPicker.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) selectTransport(transport catalog.SpriteTransport) {
+	m.connection.transport = transport
+	for index, raw := range m.transportPicker.Items() {
+		if item, ok := raw.(transportItem); ok && item.transport == transport {
+			m.transportPicker.Select(index)
+			return
+		}
+	}
+}
+
+func (m *Model) setSSHKeyChoices(choices []catalog.SSHIdentity) {
+	items := make([]list.Item, len(choices))
+	for index, identity := range choices {
+		items[index] = sshKeyItem{identity: identity}
+	}
+	m.sshKeyPicker.SetItems(items)
+	m.sshKeyPicker.Select(0)
+	m.resizeComponents()
 }
 
 func (m *Model) beginStop(destination catalog.Destination) tea.Cmd {
@@ -358,14 +373,14 @@ func (m *Model) beginProcessAttach(prepared catalog.PreparedProcessAttach) tea.C
 	command.Env = environment
 	m.showConnection(connectionAttaching)
 	opID := m.operation.id
-	return m.execProcess(command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
+	return m.execCommand(newProcessAttachmentCommand(command), func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
 
 func (m *Model) beginNativeAttach(prepared catalog.PreparedNativeAttach) tea.Cmd {
 	m.invalidateSpriteAttachObservations()
 	m.showConnection(connectionAttaching)
 	opID := m.operation.id
-	return m.execCommand(prepared.Command, func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
+	return m.execCommand(newAttachmentCommand(prepared.Command), func(err error) tea.Msg { return attachDone{opID: opID, err: err} })
 }
 
 func (m *Model) invalidateSpriteAttachObservations() {
@@ -485,52 +500,27 @@ func (m Model) connectionView(width, height int) string {
 }
 
 func (m Model) transportView(width int) string {
-	type transportOption struct {
-		transport catalog.SpriteTransport
-		title     string
-		badge     string
-		detail    string
-	}
-	options := []transportOption{
-		{
-			transport: catalog.NativePreview,
-			title:     "Native",
-			badge:     "recommended",
-			detail:    "Herdr runs inside the Sprite. No SSH service or key.",
-		},
-		{
-			transport: catalog.SSHFallback,
-			title:     "SSH",
-			detail:    "Local Herdr connects through your selected SSH key.",
-		},
-	}
 	chooserWidth := max(12, min(68, width))
-	rows := make([]string, 0, len(options)*3)
-	for index, option := range options {
-		if index > 0 {
-			rows = append(rows, borderStyle.Render("├"+strings.Repeat("─", chooserWidth-2)+"┤"))
-		}
-		rows = append(rows, renderTransportOption(option.title, option.badge, option.detail, option.transport == m.connection.transport, chooserWidth))
-	}
-	panel := borderStyle.Render("╭"+strings.Repeat("─", chooserWidth-2)+"╮") + "\n" +
-		strings.Join(rows, "\n") + "\n" +
-		borderStyle.Render("╰"+strings.Repeat("─", chooserWidth-2)+"╯")
+	panel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderStyle.GetForeground()).
+		Width(chooserWidth).
+		Render(m.transportPicker.View())
 	heading := "Choose a connection"
 	if m.connection.restart {
 		heading = "Choose a connection for the restarted session"
 	}
-	parts := []string{
+	content := strings.Join([]string{
 		titleStyle.Render(heading),
 		mutedStyle.Render("Select where Herdr itself should run."),
 		"",
 		panel,
-	}
-	content := strings.Join(parts, "\n")
+	}, "\n")
 	return lipgloss.PlaceHorizontal(width, lipgloss.Center, content)
 }
 
 func renderTransportOption(title, badge, detail string, selected bool, width int) string {
-	contentWidth := max(1, width-4)
+	contentWidth := max(1, width)
 	marker := "  "
 	markerStyle := lipgloss.NewStyle()
 	titleStyleForOption := lipgloss.NewStyle()
@@ -549,14 +539,35 @@ func renderTransportOption(title, badge, detail string, selected bool, width int
 		badgeWidth = 0
 	}
 	titleWidth := max(1, contentWidth-browserMarkerWidth-badgeWidth)
-	first := markerStyle.Render(marker) + titleStyleForOption.Width(titleWidth).Render(clip(title, titleWidth))
+	first := markerStyle.Render(marker) + renderCell(titleStyleForOption, title, titleWidth)
 	if badge != "" {
 		first += badgeStyle.Render(badge)
 	}
 	detailWidth := max(1, contentWidth-browserMarkerWidth)
-	second := markerStyle.Render(strings.Repeat(" ", browserMarkerWidth)) + detailStyle.Width(detailWidth).Render(clip(detail, detailWidth))
-	return borderStyle.Render("│") + " " + first + " " + borderStyle.Render("│") + "\n" +
-		borderStyle.Render("│") + " " + second + " " + borderStyle.Render("│")
+	second := markerStyle.Render(strings.Repeat(" ", browserMarkerWidth)) + renderCell(detailStyle, detail, detailWidth)
+	return first + "\n" + second
+}
+
+func renderSSHKeyRow(choice catalog.SSHIdentity, selected bool, width int) string {
+	marker := "  "
+	markerStyle := lipgloss.NewStyle()
+	labelStyle := lipgloss.NewStyle()
+	if selected {
+		marker = "› "
+		markerStyle = accentStyle
+		labelStyle = selectedStyle
+	}
+	label := printable(choice.Comment)
+	if label == "" {
+		label = "Unnamed key"
+	}
+	algorithm := printable(choice.Algorithm)
+	algorithmWidth := min(lipgloss.Width(algorithm), max(1, width-browserMarkerWidth-browserStatusGap-1))
+	labelWidth := max(1, width-browserMarkerWidth-browserStatusGap-algorithmWidth)
+	return markerStyle.Render(marker) +
+		renderCell(labelStyle, label, labelWidth) +
+		strings.Repeat(" ", browserStatusGap) +
+		renderCell(mutedStyle, algorithm, algorithmWidth)
 }
 
 func (m Model) sshKeyView(width int) string {
@@ -564,32 +575,13 @@ func (m Model) sshKeyView(width int) string {
 	if source == "" {
 		source = "ssh-agent"
 	}
-	lines := []string{fmt.Sprintf("%s exposes %d keys. Choose exactly one.", printable(source), len(m.connection.sshKeyChoices))}
-	for index, choice := range m.connection.sshKeyChoices {
-		selected := index == m.connection.sshKeyCursor
-		marker := "  "
-		markerStyle := lipgloss.NewStyle()
-		labelStyle := lipgloss.NewStyle()
-		if selected {
-			marker = "› "
-			markerStyle = accentStyle
-			labelStyle = selectedStyle
-		}
-		label := printable(choice.Comment)
-		if label == "" {
-			label = "Unnamed key"
-		}
-		algorithm := printable(choice.Algorithm)
-		algorithmWidth := min(lipgloss.Width(algorithm), max(1, width-browserMarkerWidth-browserStatusGap-1))
-		labelWidth := max(1, width-browserMarkerWidth-browserStatusGap-algorithmWidth)
-		row := markerStyle.Render(marker) +
-			labelStyle.Width(labelWidth).Render(clip(label, labelWidth)) +
-			strings.Repeat(" ", browserStatusGap) +
-			mutedStyle.Width(algorithmWidth).Render(clip(algorithm, algorithmWidth))
-		lines = append(lines, row)
+	keyCount := len(m.sshKeyPicker.Items())
+	lines := []string{
+		fmt.Sprintf("%s exposes %d keys. Choose exactly one.", printable(source), keyCount),
+		m.sshKeyPicker.View(),
 	}
-	if m.connection.sshKeyCursor >= 0 && m.connection.sshKeyCursor < len(m.connection.sshKeyChoices) {
-		lines = append(lines, mutedStyle.Render("Fingerprint ")+accentStyle.Render(printable(m.connection.sshKeyChoices[m.connection.sshKeyCursor].Fingerprint)))
+	if selected, ok := m.sshKeyPicker.SelectedItem().(sshKeyItem); ok {
+		lines = append(lines, mutedStyle.Render("Fingerprint ")+accentStyle.Render(printable(selected.identity.Fingerprint)))
 	}
 	return strings.Join(lines, "\n")
 }

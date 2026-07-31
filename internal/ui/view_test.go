@@ -38,10 +38,13 @@ func TestWideReadyViewUsesCenteredContentHeightSections(t *testing.T) {
 	if leading := len(lines[first]) - len(strings.TrimLeft(lines[first], " ")); leading < 20 {
 		t.Fatalf("content starts at column %d, want horizontal centering: %q", leading, lines[first])
 	}
-	for _, want := range []string{"Local sessions", "Sprites"} {
-		if !strings.Contains(plain, want) {
-			t.Errorf("grouped view lacks %q: %q", want, plain)
+	for _, title := range []string{"Local sessions", "Sprites"} {
+		if !strings.Contains(plain, title) {
+			t.Errorf("browser lacks its %q section: %q", title, plain)
 		}
+	}
+	if got := strings.Count(plain, "›"); got != 1 {
+		t.Fatalf("selected marker count = %d, want one: %q", got, plain)
 	}
 	for _, line := range lines {
 		if strings.Contains(line, "default") && !strings.Contains(line, "running") {
@@ -148,7 +151,7 @@ func TestSpriteDetailPanelUsesContentWidth(t *testing.T) {
 		model := spriteReady(t, &fakeSpriteOperations{fakeOperations: &fakeOperations{}})
 		model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
 		for _, line := range strings.Split(ansi.Strip(model.View().Content), "\n") {
-			if strings.Contains(line, "devbox sessions") && strings.Contains(line, "╭") {
+			if strings.Contains(line, "╭") {
 				if got := lipgloss.Width(strings.TrimSpace(line)); got != minBrowserPanelWidth {
 					t.Fatalf("detail panel width = %d, want %d: %q", got, minBrowserPanelWidth, line)
 				}
@@ -170,7 +173,7 @@ func TestSpriteDetailPanelUsesContentWidth(t *testing.T) {
 		model, _ = update(t, model, runFirst(t, load))
 		model, _ = update(t, model, tea.WindowSizeMsg{Width: 160, Height: 40})
 		for _, line := range strings.Split(ansi.Strip(model.View().Content), "\n") {
-			if strings.Contains(line, name) && strings.Contains(line, "╭") {
+			if strings.Contains(line, "╭") {
 				if got := lipgloss.Width(strings.TrimSpace(line)); got != maxBrowserPanelWidth {
 					t.Fatalf("long-name detail width = %d, want %d: %q", got, maxBrowserPanelWidth, line)
 				}
@@ -309,7 +312,8 @@ func TestSelectableRowsShareArrowWithoutBackground(t *testing.T) {
 	}
 	browserRow := renderBrowserRow(item, true, 48)
 	transportRow := renderTransportOption("Native", "recommended", "Herdr runs inside the Sprite.", true, 48)
-	sshModel := Model{connection: connectionState{sshKeyChoices: []catalog.SSHIdentity{{Comment: "Work key", Algorithm: "ssh-ed25519"}}, sshKeyCursor: 0}}
+	sshModel := New(context.Background(), &fakeOperations{})
+	sshModel.setSSHKeyChoices([]catalog.SSHIdentity{{Comment: "Work key", Algorithm: "ssh-ed25519"}})
 	sshRows := sshModel.sshKeyView(48)
 	for name, rendered := range map[string]string{"browser": browserRow, "transport": transportRow, "SSH": sshRows} {
 		if strings.Contains(rendered, "48;5;") {
@@ -322,7 +326,7 @@ func TestSelectableRowsShareArrowWithoutBackground(t *testing.T) {
 	browserPlain := ansi.Strip(browserRow)
 	transportPlain := ansi.Strip(transportRow)
 	sshPlain := ansi.Strip(sshRows)
-	if !strings.HasPrefix(browserPlain, "› default") || !strings.Contains(transportPlain, "│ › Native") || !strings.Contains(sshPlain, "› Work key") {
+	if !strings.HasPrefix(browserPlain, "› default") || !strings.HasPrefix(transportPlain, "› Native") || !strings.Contains(sshPlain, "› Work key") {
 		t.Fatalf("selection markers differ:\nbrowser %q\ntransport %q\nSSH %q", browserPlain, transportPlain, sshPlain)
 	}
 	if strings.Contains(transportPlain, "● Native") || strings.Contains(transportPlain, "○ Native") {
@@ -357,17 +361,17 @@ func TestBrowserLayoutUsesCompactSpacingAndConditionalPagination(t *testing.T) {
 	}}
 	model := ready(t, ops)
 	model, _ = update(t, model, tea.WindowSizeMsg{Width: 50, Height: 12})
-	if !model.browser.ShowPagination() || model.browser.Paginator.TotalPages <= 1 {
+	if model.browser.ShowPagination() || model.browser.Paginator.TotalPages <= 1 {
 		t.Fatalf("pagination = shown %v pages %d", model.browser.ShowPagination(), model.browser.Paginator.TotalPages)
 	}
 	plain := ansi.Strip(model.View().Content)
-	if !strings.Contains(plain, "Showing ") || !strings.Contains(plain, "╰") {
-		t.Fatalf("custom list clipped pagination or panel border: %q", plain)
+	if !strings.Contains(plain, "╰") || strings.Contains(plain, "Showing ") {
+		t.Fatalf("Bubbles list clipped panel border or rendered pagination text: %q", plain)
 	}
 	model.browser.SetFilterText("session")
 	plain = ansi.Strip(model.View().Content)
-	if !strings.Contains(plain, "Filter") || !strings.Contains(plain, "Showing ") || !strings.Contains(plain, "╰") {
-		t.Fatalf("filtered list clipped filter, pagination, or panel border: %q", plain)
+	if !strings.Contains(plain, "╰") || strings.Contains(plain, "Showing ") {
+		t.Fatalf("filtered list rendered pagination text or clipped panel border: %q", plain)
 	}
 }
 

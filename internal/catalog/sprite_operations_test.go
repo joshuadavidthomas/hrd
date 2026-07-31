@@ -26,6 +26,11 @@ func (f *fakeSpriteOperationBackend) PrepareHerdr(context.Context, string) error
 	return nil
 }
 
+func (f *fakeSpriteOperationBackend) SyncHerdrConfig(context.Context, string) error {
+	f.calls = append(f.calls, "sync")
+	return nil
+}
+
 func (f *fakeSpriteOperationBackend) ListHerdrSessions(context.Context, string) ([]herdr.Session, error) {
 	f.calls = append(f.calls, "list")
 	return append([]herdr.Session(nil), f.sessions...), nil
@@ -95,6 +100,14 @@ func TestSpriteHerdrInstallAndInventoryAreSeparateOperations(t *testing.T) {
 	}
 	if want := []string{"install"}; !reflect.DeepEqual(backend.calls, want) {
 		t.Fatalf("install calls = %#v, want %#v", backend.calls, want)
+	}
+
+	backend.calls = nil
+	if err := operations.SyncSpriteHerdrConfig(context.Background(), endpoint); err != nil {
+		t.Fatalf("SyncSpriteHerdrConfig() error = %v", err)
+	}
+	if want := []string{"sync"}; !reflect.DeepEqual(backend.calls, want) {
+		t.Fatalf("sync calls = %#v, want %#v", backend.calls, want)
 	}
 }
 

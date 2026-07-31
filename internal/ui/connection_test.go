@@ -47,7 +47,15 @@ func TestNamedSpriteNativeAndSSHPreparation(t *testing.T) {
 			var native tea.ExecCommand
 			var processArgs, processEnv []string
 			model.execCommand = func(command tea.ExecCommand, callback tea.ExecCallback) tea.Cmd {
-				native = command
+				wrapped, ok := command.(*attachmentCommand)
+				if !ok {
+					t.Fatalf("attach command = %T, want *attachmentCommand", command)
+				}
+				native = wrapped.command
+				if process, ok := wrapped.command.(processExecCommand); ok {
+					processArgs = append([]string(nil), process.Args...)
+					processEnv = append([]string(nil), process.Env...)
+				}
 				return func() tea.Msg { return callback(nil) }
 			}
 			model.execProcess = func(command *exec.Cmd, callback tea.ExecCallback) tea.Cmd {

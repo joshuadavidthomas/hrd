@@ -55,18 +55,19 @@ type CreateResult struct {
 
 // Client keeps the token in memory and owns every bridge derived from root.
 type Client struct {
-	sdk          *sdk.Client
-	token        string
-	root         context.Context
-	agent        *sshagent.Manager
-	nativeRunner nativeCommandRunner
-	nativeDeps   nativeDependencies
-	mu           sync.Mutex
-	closing      bool
-	bridges      map[*bridge]struct{}
-	nativeWait   sync.WaitGroup
-	shutdownOnce sync.Once
-	closed       chan struct{}
+	sdk             *sdk.Client
+	token           string
+	root            context.Context
+	agent           *sshagent.Manager
+	nativeRunner    nativeCommandRunner
+	nativeDeps      nativeDependencies
+	readHerdrConfig func() ([]byte, error)
+	mu              sync.Mutex
+	closing         bool
+	bridges         map[*bridge]struct{}
+	nativeWait      sync.WaitGroup
+	shutdownOnce    sync.Once
+	closed          chan struct{}
 }
 
 func New(root context.Context, token string, agentManager *sshagent.Manager) *Client {
@@ -78,7 +79,7 @@ func New(root context.Context, token string, agentManager *sshagent.Manager) *Cl
 	}
 	httpClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	provider := sdk.New(token, sdk.WithHTTPClient(httpClient), sdk.WithDisableControl())
-	c := &Client{sdk: provider, token: token, root: root, agent: agentManager, nativeRunner: sdkNativeCommandRunner{client: provider}, nativeDeps: productionNativeDependencies(), bridges: make(map[*bridge]struct{}), closed: make(chan struct{})}
+	c := &Client{sdk: provider, token: token, root: root, agent: agentManager, nativeRunner: sdkNativeCommandRunner{client: provider}, nativeDeps: productionNativeDependencies(), readHerdrConfig: readLocalHerdrConfig, bridges: make(map[*bridge]struct{}), closed: make(chan struct{})}
 	go func() { <-root.Done(); c.closeAll() }()
 	return c
 }

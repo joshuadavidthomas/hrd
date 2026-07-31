@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"image/color"
 	"io"
 	"os/exec"
 	"strings"
@@ -49,12 +50,14 @@ type fakeSpriteOperations struct {
 	createCalls        atomic.Int32
 	listSpriteCalls    atomic.Int32
 	installCalls       atomic.Int32
+	syncConfigCalls    atomic.Int32
 	stopCalls          atomic.Int32
 	prepareSpriteCalls atomic.Int32
 	inventoryFn        func(context.Context, int) catalog.Inventory
 	createFn           func(context.Context, string, int) sprites.CreateResult
 	listSpriteFn       func(context.Context, catalog.SpriteEndpointSelection, int) ([]catalog.Destination, error)
 	installFn          func(context.Context, catalog.SpriteEndpointSelection, int) error
+	syncConfigFn       func(context.Context, catalog.SpriteEndpointSelection, int) error
 	stopFn             func(context.Context, catalog.SpriteSessionSelection, int) error
 	prepareSpriteFn    func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error)
 	preparedSelection  catalog.SpriteSessionSelection
@@ -98,6 +101,14 @@ func (f *fakeSpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint 
 	return nil
 }
 
+func (f *fakeSpriteOperations) SyncSpriteHerdrConfig(ctx context.Context, endpoint catalog.SpriteEndpointSelection) error {
+	call := int(f.syncConfigCalls.Add(1))
+	if f.syncConfigFn != nil {
+		return f.syncConfigFn(ctx, endpoint, call)
+	}
+	return nil
+}
+
 func (f *fakeSpriteOperations) StopSpriteSession(ctx context.Context, selection catalog.SpriteSessionSelection) error {
 	call := int(f.stopCalls.Add(1))
 	if f.stopFn != nil {
@@ -131,6 +142,17 @@ func (*fakeTerminalCommand) SetStdin(io.Reader)  {}
 func (*fakeTerminalCommand) SetStdout(io.Writer) {}
 func (*fakeTerminalCommand) SetStderr(io.Writer) {}
 
+func TestBackgroundColorUpdatesCharmStyles(t *testing.T) {
+	model := New(context.Background(), &fakeOperations{})
+	model, _ = update(t, model, tea.BackgroundColorMsg{Color: color.RGBA{R: 255, G: 255, B: 255, A: 255}})
+	if model.isDark {
+		t.Fatal("white terminal background was classified as dark")
+	}
+	if model.background == nil {
+		t.Fatal("terminal background was not retained")
+	}
+}
+
 func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 	ops := &fakeOperations{}
 	model := New(context.Background(), ops)
@@ -145,7 +167,7 @@ func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 		t.Fatalf("loaded phase/items/calls/cmd = %v/%d/%d/%v", model.active, len(model.browser.Items()), ops.inventoryCalls.Load(), cmd)
 	}
 	view := model.View()
-	for _, want := range []string{"default", "Local", "running", "alpha", "stopped", "enter", "refresh"} {
+	for _, want := range []string{"Local sessions", "default", "running", "alpha", "stopped", "enter", "refresh"} {
 		if !strings.Contains(view.Content, want) {
 			t.Errorf("ready view lacks %q: %q", want, view.Content)
 		}

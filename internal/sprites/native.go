@@ -19,10 +19,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
 	"github.com/gorilla/websocket"
 	"github.com/muesli/cancelreader"
 	sdk "github.com/superfly/sprites-go"
-	"golang.org/x/term"
 
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
 )
@@ -37,6 +38,7 @@ const (
 	nativeBaseURL             = "wss://api.sprites.dev"
 	nativeOutputMax           = 4096
 	herdrSessionListOutputMax = 1 << 20
+	localHerdrConfigMax       = 1 << 20
 	herdrExecutableTimeout    = 5 * time.Second
 	herdrSessionListTimeout   = 10 * time.Second
 	herdrSessionStopTimeout   = 10 * time.Second
@@ -50,6 +52,7 @@ type nativeCommandSpec struct {
 	path        string
 	args        []string
 	env         []string
+	stdin       []byte
 	outputLimit int
 }
 
@@ -64,6 +67,9 @@ type sdkNativeCommandRunner struct {
 func (r sdkNativeCommandRunner) Run(ctx context.Context, name string, spec nativeCommandSpec) (string, error) {
 	cmd := r.client.Sprite(name).CommandContext(ctx, spec.path, spec.args...)
 	cmd.Env = spec.env
+	if spec.stdin != nil {
+		cmd.Stdin = bytes.NewReader(spec.stdin)
+	}
 	cmd.Stderr = ioDiscard{}
 	output := boundedBuffer{limit: spec.outputLimit}
 	if spec.outputLimit > 0 {
@@ -104,7 +110,40 @@ func (c *Client) PrepareHerdr(ctx context.Context, name string) error {
 	defer c.nativeWait.Done()
 	ctx, cancel := context.WithTimeout(ctx, prepareTimeout)
 	defer cancel()
-	return prepareNativeExecutable(ctx, c.commandRunner(), name)
+	var config []byte
+	if c.readHerdrConfig != nil {
+		var err error
+		config, err = c.readHerdrConfig()
+		if err != nil {
+			return err
+		}
+	}
+	return prepareNativeExecutable(ctx, c.commandRunner(), name, config)
+}
+
+// SyncHerdrConfig copies the local Herdr config to an existing Sprite without
+// installing or verifying the remote executable.
+func (c *Client) SyncHerdrConfig(ctx context.Context, name string) error {
+	if c == nil {
+		return errors.New("Sprite access is disabled")
+	}
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	if !c.beginNativePreparation() {
+		return context.Canceled
+	}
+	defer c.nativeWait.Done()
+	ctx, cancel := context.WithTimeout(ctx, prepareTimeout)
+	defer cancel()
+	if c.readHerdrConfig == nil {
+		return nil
+	}
+	config, err := c.readHerdrConfig()
+	if err != nil {
+		return err
+	}
+	return copyHerdrConfig(ctx, c.commandRunner(), name, config)
 }
 
 // HerdrInstalled checks only whether the fixed Herdr executable is executable.
@@ -241,13 +280,16 @@ func (c *Client) beginNativePreparation() bool {
 	return true
 }
 
-func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, name string) error {
+func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, name string, config []byte) error {
 	installed, err := herdrInstalled(ctx, runner, name)
 	if err != nil {
 		return err
 	}
 	if installed {
-		return runNativeVersion(ctx, runner, name)
+		if err := runNativeVersion(ctx, runner, name); err != nil {
+			return err
+		}
+		return copyHerdrConfig(ctx, runner, name, config)
 	}
 
 	output, err := runner.Run(ctx, name, nativeCommandSpec{path: "/usr/bin/mktemp", outputLimit: nativeOutputMax})
@@ -269,7 +311,108 @@ func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, na
 	if cleanupErr != nil {
 		return nativeStepError("remove installer temporary file", cleanupErr)
 	}
-	return runNativeVersion(ctx, runner, name)
+	if err := runNativeVersion(ctx, runner, name); err != nil {
+		return err
+	}
+	return copyHerdrConfig(ctx, runner, name, config)
+}
+
+func readLocalHerdrConfig() ([]byte, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, errors.New("find local Herdr config failed")
+	}
+	configPath := pathpkg.Join(configDir, "herdr", "config.toml")
+	info, err := os.Stat(configPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errors.New("read local Herdr config failed")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("local Herdr config is not a regular file")
+	}
+	if info.Size() > localHerdrConfigMax {
+		return nil, fmt.Errorf("local Herdr config exceeds %d bytes", localHerdrConfigMax)
+	}
+
+	file, err := os.Open(configPath)
+	if err != nil {
+		return nil, errors.New("read local Herdr config failed")
+	}
+	defer func() { _ = file.Close() }()
+	config, err := io.ReadAll(io.LimitReader(file, localHerdrConfigMax+1))
+	if err != nil {
+		return nil, errors.New("read local Herdr config failed")
+	}
+	if len(config) > localHerdrConfigMax {
+		return nil, fmt.Errorf("local Herdr config exceeds %d bytes", localHerdrConfigMax)
+	}
+	return config, nil
+}
+
+func copyHerdrConfig(ctx context.Context, runner nativeCommandRunner, name string, config []byte) error {
+	if config == nil {
+		return nil
+	}
+	const (
+		configDir  = "/home/sprite/.config/herdr"
+		configPath = configDir + "/config.toml"
+	)
+	if _, err := runner.Run(ctx, name, nativeCommandSpec{path: "/usr/bin/install", args: []string{"-d", "-m", "0700", configDir}}); err != nil {
+		return nativeStepErrorWithContext(ctx, "create Herdr config directory", err)
+	}
+	output, err := runner.Run(ctx, name, nativeCommandSpec{
+		path:        "/usr/bin/mktemp",
+		args:        []string{configDir + "/config.toml.tmp.XXXXXX"},
+		outputLimit: nativeOutputMax,
+	})
+	if err != nil {
+		return nativeStepErrorWithContext(ctx, "create Herdr config temporary file", err)
+	}
+	tempPath, err := validHerdrConfigTempPath(output, configDir)
+	if err != nil {
+		return err
+	}
+
+	copyErr := writeHerdrConfig(ctx, runner, name, tempPath, configPath, config)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	_, cleanupErr := runner.Run(cleanupCtx, name, nativeCommandSpec{path: "/bin/rm", args: []string{"-f", tempPath}})
+	cleanupCancel()
+	if copyErr != nil {
+		return copyErr
+	}
+	if cleanupErr != nil {
+		return nativeStepError("remove Herdr config temporary file", cleanupErr)
+	}
+	return nil
+}
+
+func writeHerdrConfig(ctx context.Context, runner nativeCommandRunner, name, tempPath, configPath string, config []byte) error {
+	steps := []struct {
+		action string
+		spec   nativeCommandSpec
+	}{
+		{"write Herdr config", nativeCommandSpec{path: "/usr/bin/tee", args: []string{tempPath}, stdin: config}},
+		{"set Herdr config permissions", nativeCommandSpec{path: "/bin/chmod", args: []string{"0600", tempPath}}},
+		{"replace Herdr config", nativeCommandSpec{path: "/bin/mv", args: []string{"-fT", tempPath, configPath}}},
+	}
+	for _, step := range steps {
+		if _, err := runner.Run(ctx, name, step.spec); err != nil {
+			return nativeStepErrorWithContext(ctx, step.action, err)
+		}
+	}
+	return nil
+}
+
+func validHerdrConfigTempPath(output, configDir string) (string, error) {
+	path := strings.TrimSpace(output)
+	cleaned := pathpkg.Clean(path)
+	if path == "" || path != cleaned || pathpkg.Dir(cleaned) != configDir || !strings.HasPrefix(pathpkg.Base(cleaned), "config.toml.tmp.") {
+		return "", errors.New("Sprite returned an unsafe Herdr config temporary path")
+	}
+	return cleaned, nil
 }
 
 func runNativeInstall(ctx context.Context, runner nativeCommandRunner, name, tempPath string) error {
@@ -394,7 +537,7 @@ type nativeSystemTerminal struct{}
 
 func (nativeSystemTerminal) IsTerminal(value any) bool {
 	file, ok := value.(fileDescriptor)
-	return ok && term.IsTerminal(int(file.Fd()))
+	return ok && term.IsTerminal(file.Fd())
 }
 
 func (nativeSystemTerminal) Size(output io.Writer) (int, int, error) {
@@ -402,7 +545,7 @@ func (nativeSystemTerminal) Size(output io.Writer) (int, int, error) {
 	if !ok {
 		return 0, 0, errors.New("output has no terminal file descriptor")
 	}
-	return term.GetSize(int(file.Fd()))
+	return term.GetSize(file.Fd())
 }
 
 func (nativeSystemTerminal) MakeRaw(input io.Reader) (any, error) {
@@ -410,7 +553,7 @@ func (nativeSystemTerminal) MakeRaw(input io.Reader) (any, error) {
 	if !ok {
 		return nil, errors.New("input has no terminal file descriptor")
 	}
-	return term.MakeRaw(int(file.Fd()))
+	return term.MakeRaw(file.Fd())
 }
 
 func (nativeSystemTerminal) Restore(input io.Reader, state any) error {
@@ -419,7 +562,7 @@ func (nativeSystemTerminal) Restore(input io.Reader, state any) error {
 	if !fileOK || !stateOK {
 		return errors.New("invalid terminal state")
 	}
-	return term.Restore(int(file.Fd()), terminalState)
+	return term.Restore(file.Fd(), terminalState)
 }
 
 type nativeSystemSignals struct{}
@@ -427,8 +570,10 @@ type nativeSystemSignals struct{}
 func (nativeSystemSignals) Notify(ch chan<- os.Signal) { signal.Notify(ch, syscall.SIGWINCH) }
 func (nativeSystemSignals) Stop(ch chan<- os.Signal)   { signal.Stop(ch) }
 
-// NativeCommand is an interactive direct PTY command for herdr on a Sprite.
-// Its setters match Bubble Tea's ExecCommand interface without importing UI code.
+// NativeCommand owns the direct Sprite PTY because the SDK does not expose
+// the established WebSocket needed to close an interactive command when its
+// context is canceled. Its setters match Bubble Tea's ExecCommand interface
+// without importing UI code.
 type NativeCommand struct {
 	ctx     context.Context
 	name    string
@@ -458,6 +603,8 @@ func (c *NativeCommand) Run() (runErr error) {
 	if err != nil || !validTerminalSize(cols, rows) {
 		return errors.New("read terminal size failed")
 	}
+	_, _ = io.WriteString(c.stderr, ansi.HideCursor)
+	defer func() { _, _ = io.WriteString(c.stderr, ansi.ShowCursor) }()
 	state, err := c.deps.terminal.MakeRaw(c.stdin)
 	if err != nil {
 		return errors.New("enter terminal raw mode failed")
