@@ -8,7 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/term v0.2.2
-	github.com/gorilla/websocket v1.5.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/muesli/cancelreader v0.2.2
 	github.com/superfly/sprites-go v0.0.0-20260708201521-ea9d9d9f2054
 	golang.org/x/crypto v0.54.0
