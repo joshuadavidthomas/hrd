@@ -55,12 +55,12 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.active, model.active, ops.listSpriteCalls.Load(), load)
 	}
 	loadingView := ansi.Strip(model.View().Content)
-	for _, want := range []string{"devbox sessions", "Loading sessions", ansi.Strip(model.spinner.View())} {
+	for _, want := range []string{"Loading sessions", ansi.Strip(model.spinner.View())} {
 		if !strings.Contains(loadingView, want) {
 			t.Errorf("loading detail lacks %q: %q", want, loadingView)
 		}
 	}
-	for _, unwanted := range []string{"Waking", "checking Herdr", "three minutes"} {
+	for _, unwanted := range []string{"devbox sessions", "Waking", "checking Herdr", "three minutes"} {
 		if strings.Contains(loadingView, unwanted) {
 			t.Errorf("loading detail contains %q: %q", unwanted, loadingView)
 		}

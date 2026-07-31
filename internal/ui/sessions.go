@@ -5,7 +5,6 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
 )
@@ -185,10 +184,7 @@ func (m *Model) beginSpriteRefresh() tea.Cmd {
 func (m Model) sessionsView(width, height int) string {
 	switch m.sessions.phase {
 	case sessionsLoading:
-		panelWidth := m.browserPanelWidth(width)
-		loading := m.spinner.View() + " " + mutedStyle.Render("Loading sessions…")
-		panel := renderBrowserPanel(m.spriteName()+" sessions", "", nil, panelWidth, loading)
-		return fitView(lipgloss.PlaceHorizontal(width, lipgloss.Center, panel), width, height)
+		return m.busyLine("Loading sessions…", width)
 	case sessionsConfirmingInstall:
 		return titleStyle.Render("Install Herdr?")
 	case sessionsInstallingHerdr:
