@@ -85,10 +85,11 @@ func (m *Model) reconcileSessionCache() {
 }
 
 type spriteSessionsDone struct {
-	opID         uint64
-	rows         []catalog.Destination
-	err          error
-	configSynced bool
+	opID          uint64
+	rows          []catalog.Destination
+	err           error
+	configSyncErr error
+	configSynced  bool
 }
 
 type cachedSpriteSessions struct {
@@ -192,6 +193,9 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 		m.sessions.configSyncPending = false
 	}
 	m.applySpriteSessions(cachedSpriteSessions{endpointID: m.sessions.spriteEndpoint.ID, rows: msg.rows, err: msg.err}, refreshing, selected)
+	if msg.err == nil && msg.configSyncErr != nil {
+		m.refreshNotice = "Herdr config sync failed: " + printable(msg.configSyncErr.Error())
+	}
 	return m, nil
 }
 
@@ -272,11 +276,12 @@ func (m *Model) beginSpriteSessions(syncConfig bool, cached *cachedSpriteSession
 			err = cached.err
 		}
 		configSynced := false
+		var configSyncErr error
 		if err == nil && syncConfig {
-			err = operations.SyncSpriteHerdrConfig(ctx, selection)
-			configSynced = err == nil
+			configSyncErr = operations.SyncSpriteHerdrConfig(ctx, selection)
+			configSynced = configSyncErr == nil
 		}
-		return spriteSessionsDone{opID: opID, rows: append([]catalog.Destination(nil), rows...), err: err, configSynced: configSynced}
+		return spriteSessionsDone{opID: opID, rows: append([]catalog.Destination(nil), rows...), err: err, configSyncErr: configSyncErr, configSynced: configSynced}
 	}
 }
 

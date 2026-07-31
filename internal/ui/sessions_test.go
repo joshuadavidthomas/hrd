@@ -310,6 +310,11 @@ func TestSpriteOpenRetriesPendingConfigSyncAfterFailure(t *testing.T) {
 			if !model.sessions.configSyncPending || model.active != workflowSessions {
 				t.Fatalf("failed open = pending %v active %v", model.sessions.configSyncPending, model.active)
 			}
+			if test.name == "config sync failure" {
+				if !model.ready() || len(model.browser.Items()) != 2 || !strings.Contains(model.refreshNotice, "Herdr config sync failed: sync failed") {
+					t.Fatalf("sync failure = ready %v items %d notice %q", model.ready(), len(model.browser.Items()), model.refreshNotice)
+				}
+			}
 			model, refresh := update(t, model, press("r"))
 			model, _ = update(t, model, runFirst(t, refresh))
 			if model.sessions.configSyncPending || !model.ready() || ops.syncConfigCalls.Load() != test.wantSyncCalls {
