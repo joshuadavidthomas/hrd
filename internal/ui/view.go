@@ -20,7 +20,7 @@ func (m Model) busy() bool {
 	}
 	switch m.active {
 	case workflowHome:
-		return m.home.phase == homeCreatingSprite
+		return m.home.phase == homeCreatingSprite || m.home.phase == homeOpeningSprite
 	case workflowSessions:
 		return m.sessions.phase == sessionsLoading || m.sessions.phase == sessionsRefreshing || m.sessions.phase == sessionsInstallingHerdr
 	case workflowConnection:
@@ -153,6 +153,8 @@ func (m Model) toastView() string {
 	progress := ""
 	if m.home.inventoryRefreshing && m.home.inventoryRefreshVisible {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing local and Sprite inventory…")
+	} else if m.active == workflowHome && m.home.phase == homeOpeningSprite {
+		progress = m.spinner.View() + " " + accentStyle.Render("Loading "+m.spriteName()+" sessions…")
 	} else if m.active == workflowSessions && m.sessions.phase == sessionsRefreshing {
 		progress = m.spinner.View() + " " + accentStyle.Render("Refreshing "+m.spriteName()+" sessions…")
 	}
@@ -368,6 +370,8 @@ func (m Model) helpView() string {
 		switch m.home.phase {
 		case homeNamingSprite:
 			short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "create")), escapeTo("home"), m.keys.force}
+		case homeOpeningSprite:
+			short = []key.Binding{escapeTo("home"), m.keys.force}
 		case homeReady:
 			if m.browser.SettingFilter() {
 				short = []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")), escapeTo("list"), m.keys.force}

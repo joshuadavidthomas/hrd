@@ -61,6 +61,7 @@ type homePhase uint8
 const (
 	homeLoading homePhase = iota + 1
 	homeReady
+	homeOpeningSprite
 	homeNamingSprite
 	homeCreatingSprite
 	homeInitialLoadFailed
@@ -292,6 +293,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateCreateDone(msg)
 	case spriteSessionsDone:
 		return m.updateSpriteSessionsDone(msg)
+	case spriteSessionsPrefetched:
+		return m.updateSpriteSessionsPrefetched(msg)
 	case installSpriteHerdrDone:
 		return m.updateInstallSpriteHerdrDone(msg)
 	case prepareDone:
@@ -315,6 +318,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	textEditing := (m.active == workflowHome && m.home.phase == homeNamingSprite) || (m.ready() && m.browser.SettingFilter())
 	if key.Matches(msg, m.keys.force) || (key.Matches(msg, m.keys.quit) && !textEditing) {
 		m.cancelOperation()
+		m.cancelSessionPrefetch()
 		closePrepared(m.connection.prepared)
 		m.connection.prepared = nil
 		m.quitting = true

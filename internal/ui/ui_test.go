@@ -164,8 +164,8 @@ func TestActiveWorkflowOwnsItsPhase(t *testing.T) {
 	model, _ = update(t, model, run(t, model.initialCmd))
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
-	if model.active != workflowSessions || model.sessions.phase != sessionsLoading {
-		t.Fatalf("Sprite workflow/phase = %v/%v", model.active, model.sessions.phase)
+	if model.active != workflowHome || model.home.phase != homeOpeningSprite || model.sessions.phase != sessionsLoading {
+		t.Fatalf("opening workflows/phases = %v/%v/%v", model.active, model.home.phase, model.sessions.phase)
 	}
 	model, _ = update(t, model, runFirst(t, load))
 	model, _ = update(t, model, press("enter"))

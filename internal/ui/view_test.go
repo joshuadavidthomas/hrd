@@ -267,8 +267,8 @@ func TestBreadcrumbsAndEscapeHintsNameTheReturnDestination(t *testing.T) {
 
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
-	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd  / devbox" || !strings.Contains(ansi.Strip(model.helpView()), "esc home") {
-		t.Fatalf("loading Sprite context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
+	if breadcrumb := ansi.Strip(model.breadcrumbView()); breadcrumb != "hrd" || !strings.Contains(ansi.Strip(model.helpView()), "esc home") {
+		t.Fatalf("opening Sprite context = breadcrumb %q help %q", breadcrumb, ansi.Strip(model.helpView()))
 	}
 	model, _ = update(t, model, runFirst(t, load))
 	if help := ansi.Strip(model.helpView()); !strings.Contains(help, "esc home") {

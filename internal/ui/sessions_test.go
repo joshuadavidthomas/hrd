@@ -14,15 +14,140 @@ import (
 	"github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
+func TestWarmSpritesPrefetchSessionsAndOpenFromCache(t *testing.T) {
+	for _, state := range []sprites.State{sprites.Running, sprites.Warm} {
+		t.Run(string(state), func(t *testing.T) {
+			ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+			ops.inventoryFn = func(context.Context, int) catalog.Inventory {
+				return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", state)}}
+			}
+			model := New(context.Background(), ops)
+			model, prefetch := update(t, model, run(t, model.initialCmd))
+			if prefetch == nil || !model.ready() || ops.listSpriteCalls.Load() != 0 {
+				t.Fatalf("prefetch start = ready %v calls %d cmd %v", model.ready(), ops.listSpriteCalls.Load(), prefetch)
+			}
+			model, _ = update(t, model, run(t, prefetch))
+			if ops.listSpriteCalls.Load() != 1 {
+				t.Fatalf("prefetch calls = %d", ops.listSpriteCalls.Load())
+			}
+			model.browser.Select(2)
+			model, load := update(t, model, press("enter"))
+			if load != nil || model.active != workflowSessions || !model.ready() || len(model.browser.Items()) != 2 {
+				t.Fatalf("cached open = active %v ready %v items %d cmd %v", model.active, model.ready(), len(model.browser.Items()), load)
+			}
+			model.sessions.invalidate()
+			if _, cached := model.sessions.cached(model.sessions.spriteEndpoint.ID); cached {
+				t.Fatal("invalidated session observation remained cached")
+			}
+		})
+	}
+}
+
+func TestWarmPrefetchRequiresCurrentSpriteInventory(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		inventory := catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}}
+		if call == 1 {
+			inventory.Sprites.Rows = spriteEndpointRows("devbox", sprites.Warm)
+		} else {
+			inventory.Sprites.Err = errors.New("provider unavailable")
+		}
+		return inventory
+	}
+	model := New(context.Background(), ops)
+	model, prefetch := update(t, model, run(t, model.initialCmd))
+	if prefetch == nil {
+		t.Fatal("warm Sprite did not begin prefetch")
+	}
+	model, refresh := update(t, model, press("r"))
+	model, nextPrefetch := update(t, model, runFirst(t, refresh))
+	if model.home.spriteSnapshot.current || nextPrefetch != nil {
+		t.Fatalf("stale Sprite source prefetched: current %v cmd %v", model.home.spriteSnapshot.current, nextPrefetch)
+	}
+	model, _ = update(t, model, run(t, prefetch))
+	if _, cached := model.sessions.cached(spriteEndpointRows("devbox", sprites.Warm)[0].ID); cached {
+		t.Fatal("canceled stale prefetch populated the cache")
+	}
+}
+
+func TestExplicitRefreshClearsCacheDuringSilentRefresh(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := New(context.Background(), ops)
+	model, prefetch := update(t, model, run(t, model.initialCmd))
+	model, _ = update(t, model, run(t, prefetch))
+	endpointID := spriteEndpointRows("devbox", sprites.Running)[0].ID
+	if _, cached := model.sessions.cached(endpointID); !cached {
+		t.Fatal("warm prefetch did not populate the cache")
+	}
+	model, _ = update(t, model, refreshTick(time.Now()))
+	if !model.home.inventoryRefreshing || model.home.inventoryRefreshVisible {
+		t.Fatalf("silent refresh state = refreshing %v visible %v", model.home.inventoryRefreshing, model.home.inventoryRefreshVisible)
+	}
+	model, _ = update(t, model, press("r"))
+	if _, cached := model.sessions.cached(endpointID); cached {
+		t.Fatal("explicit refresh promotion retained the session cache")
+	}
+}
+
+func TestRunningToColdInventoryRejectsOldPrefetch(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(_ context.Context, call int) catalog.Inventory {
+		state := sprites.Running
+		if call > 1 {
+			state = sprites.Cold
+		}
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", state)}}
+	}
+	model := New(context.Background(), ops)
+	model, oldPrefetch := update(t, model, run(t, model.initialCmd))
+	model, _ = update(t, model, run(t, model.beginSilentInventory()))
+	model, _ = update(t, model, run(t, oldPrefetch))
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	if load == nil || model.active != workflowHome || model.home.phase != homeOpeningSprite {
+		t.Fatalf("Cold Sprite used stale prefetch: active %v phase %v cmd %v", model.active, model.home.phase, load)
+	}
+}
+
+func TestColdSpriteStaysOnHomeUntilSessionsLoad(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.inventoryFn = func(context.Context, int) catalog.Inventory {
+		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Cold)}}
+	}
+	model := New(context.Background(), ops)
+	model, prefetch := update(t, model, run(t, model.initialCmd))
+	if prefetch != nil || ops.listSpriteCalls.Load() != 0 {
+		t.Fatalf("cold Sprite was prefetched: calls %d cmd %v", ops.listSpriteCalls.Load(), prefetch)
+	}
+	model.browser.Select(2)
+	model, load := update(t, model, press("enter"))
+	if load == nil || model.active != workflowHome || model.home.phase != homeOpeningSprite {
+		t.Fatalf("cold open = active %v phase %v cmd %v", model.active, model.home.phase, load)
+	}
+	plain := ansi.Strip(model.View().Content)
+	for _, want := range []string{"Local sessions", "Sprites", "Loading devbox sessions"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("Home while opening lacks %q: %q", want, plain)
+		}
+	}
+	model, _ = update(t, model, runFirst(t, load))
+	if model.active != workflowSessions || !model.ready() {
+		t.Fatalf("cold completion = active %v ready %v", model.active, model.ready())
+	}
+}
+
 func TestNavigationBetweenEndpointAndSpriteScreensResetsFilter(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
 	model := ready(t, ops)
 	model.browser.SetFilterText("devbox")
 	model, load := update(t, model, press("enter"))
+	if model.browser.FilterValue() != "devbox" || model.browser.SettingFilter() {
+		t.Fatalf("endpoint filter changed while opening = setting %v query %q", model.browser.SettingFilter(), model.browser.FilterValue())
+	}
+	model, _ = update(t, model, runFirst(t, load))
 	if model.browser.FilterValue() != "" || model.browser.SettingFilter() {
 		t.Fatalf("endpoint filter survived drill-in = setting %v query %q", model.browser.SettingFilter(), model.browser.FilterValue())
 	}
-	model, _ = update(t, model, runFirst(t, load))
 	model.browser.SetFilterText("work")
 	model, reconcile := update(t, model, press("esc"))
 	if model.active != workflowHome || model.browser.FilterValue() != "" || model.browser.SettingFilter() || reconcile == nil {
@@ -51,19 +176,17 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 	model := ready(t, ops)
 	model.browser.Select(2)
 	model, load := update(t, model, press("enter"))
-	if model.active != workflowSessions || model.sessions.phase != sessionsLoading || load == nil || ops.listSpriteCalls.Load() != 0 {
-		t.Fatalf("drill phase/screen/calls/cmd = %v/%v/%d/%v", model.active, model.active, ops.listSpriteCalls.Load(), load)
+	if model.active != workflowHome || model.home.phase != homeOpeningSprite || model.sessions.phase != sessionsLoading || load == nil || ops.listSpriteCalls.Load() != 0 {
+		t.Fatalf("drill workflows/phases/calls/cmd = %v/%v/%v/%d/%v", model.active, model.home.phase, model.sessions.phase, ops.listSpriteCalls.Load(), load)
 	}
 	loadingView := ansi.Strip(model.View().Content)
-	for _, want := range []string{"Loading sessions", ansi.Strip(model.spinner.View())} {
+	for _, want := range []string{"Local sessions", "Sprites", "Loading devbox sessions", ansi.Strip(model.spinner.View())} {
 		if !strings.Contains(loadingView, want) {
-			t.Errorf("loading detail lacks %q: %q", want, loadingView)
+			t.Errorf("opening Home lacks %q: %q", want, loadingView)
 		}
 	}
-	for _, unwanted := range []string{"devbox sessions", "Waking", "checking Herdr", "three minutes"} {
-		if strings.Contains(loadingView, unwanted) {
-			t.Errorf("loading detail contains %q: %q", unwanted, loadingView)
-		}
+	if strings.Contains(loadingView, "devbox sessions\n") {
+		t.Errorf("opening Home rendered the Sprite session panel: %q", loadingView)
 	}
 	model, _ = update(t, model, runFirst(t, load))
 	if !model.ready() || len(model.browser.Items()) != 2 || ops.listSpriteCalls.Load() != 1 || ops.prepareSpriteCalls.Load() != 0 {
@@ -108,10 +231,9 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 
 	model.browser.Select(2)
 	model, load = update(t, model, press("enter"))
-	ops.listSpriteFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, _ int) ([]catalog.Destination, error) {
-		return nil, catalog.ErrSpriteHerdrMissing
+	if load != nil || model.sessions.phase != sessionsConfirmingInstall {
+		t.Fatalf("cached missing-Herdr result = phase %v cmd %v", model.sessions.phase, load)
 	}
-	model, _ = update(t, model, runFirst(t, load))
 	model, install := update(t, model, press("y"))
 	if model.sessions.phase != sessionsInstallingHerdr || install == nil || ops.installCalls.Load() != 0 {
 		t.Fatalf("install start = phase %v calls %d cmd %v", model.active, ops.installCalls.Load(), install)
@@ -124,8 +246,11 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 		return spriteSessionRows("devbox", sprites.Running), nil
 	}
 	model, relist := update(t, model, runFirst(t, install))
-	if model.sessions.phase != sessionsLoading || relist == nil || ops.installCalls.Load() != 1 {
-		t.Fatalf("install completion = phase %v calls %d cmd %v", model.active, ops.installCalls.Load(), relist)
+	if _, cached := model.sessions.cached(model.sessions.spriteEndpoint.ID); cached {
+		t.Fatal("successful install retained the missing-Herdr cache entry")
+	}
+	if model.sessions.phase != sessionsInstallingHerdr || relist == nil || ops.installCalls.Load() != 1 {
+		t.Fatalf("install completion = phase %v calls %d cmd %v", model.sessions.phase, ops.installCalls.Load(), relist)
 	}
 	model, _ = update(t, model, runFirst(t, relist))
 	if !model.ready() || len(model.browser.Items()) != 2 {
@@ -157,7 +282,7 @@ func TestSpriteDetailSnapshotIsResetAcrossEndpoints(t *testing.T) {
 	model, _ = update(t, model, runFirst(t, reconcile))
 	model.browser.Select(3)
 	model, load = update(t, model, press("enter"))
-	if len(model.browser.Items()) != 0 || model.sessions.spriteSnapshotDetail.loaded {
+	if model.active != workflowHome || model.home.phase != homeOpeningSprite || model.sessions.spriteSnapshotDetail.loaded {
 		t.Fatal("beta load exposed alpha snapshot")
 	}
 	model, _ = update(t, model, runFirst(t, load))

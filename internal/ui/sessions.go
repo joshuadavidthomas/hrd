@@ -1,12 +1,15 @@
 package ui
 
 import (
+	"context"
 	"errors"
+	"sync"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
+	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
 type sessionsState struct {
@@ -15,6 +18,9 @@ type sessionsState struct {
 	spriteEndpoint          catalog.Destination
 	spriteEndpointSelection catalog.SpriteEndpointSelection
 	spriteSnapshotDetail    sourceSnapshot
+	cache                   map[catalog.DestinationID]cachedSpriteSessions
+	prefetchID              uint64
+	prefetchCancel          context.CancelFunc
 }
 
 func (s *sessionsState) open(endpoint catalog.Destination, selection catalog.SpriteEndpointSelection) {
@@ -26,12 +32,76 @@ func (s *sessionsState) open(endpoint catalog.Destination, selection catalog.Spr
 
 func (s *sessionsState) invalidate() {
 	s.spriteSnapshotDetail.current = false
+	delete(s.cache, s.spriteEndpoint.ID)
+}
+
+func (s sessionsState) cached(endpointID catalog.DestinationID) (cachedSpriteSessions, bool) {
+	cached, ok := s.cache[endpointID]
+	return cached, ok
+}
+
+func (s *sessionsState) store(cached cachedSpriteSessions) {
+	if s.cache == nil {
+		s.cache = make(map[catalog.DestinationID]cachedSpriteSessions)
+	}
+	cached.rows = append([]catalog.Destination(nil), cached.rows...)
+	s.cache[cached.endpointID] = cached
+}
+
+func eagerSprite(destination catalog.Destination) bool {
+	status, ok := destination.Status.(catalog.SpriteStatus)
+	return ok && (status.Lifecycle == spriteapi.Running || status.Lifecycle == spriteapi.Warm)
+}
+
+func (m Model) eagerSpriteCurrent(endpointID catalog.DestinationID) bool {
+	if !m.home.spriteSnapshot.current {
+		return false
+	}
+	for _, destination := range m.home.spriteSnapshot.rows {
+		if destination.ID == endpointID {
+			return eagerSprite(destination)
+		}
+	}
+	return false
+}
+
+func (m *Model) clearSessionCache() {
+	m.cancelSessionPrefetch()
+	m.sessions.cache = nil
+}
+
+func (m *Model) reconcileSessionCache() {
+	if !m.home.spriteSnapshot.current {
+		m.clearSessionCache()
+		return
+	}
+	for endpointID := range m.sessions.cache {
+		if !m.eagerSpriteCurrent(endpointID) {
+			delete(m.sessions.cache, endpointID)
+		}
+	}
 }
 
 type spriteSessionsDone struct {
 	opID uint64
 	rows []catalog.Destination
 	err  error
+}
+
+type cachedSpriteSessions struct {
+	endpointID catalog.DestinationID
+	rows       []catalog.Destination
+	err        error
+}
+
+type spriteSessionsPrefetched struct {
+	prefetchID uint64
+	results    []cachedSpriteSessions
+}
+
+type spriteSessionPrefetchTarget struct {
+	endpointID catalog.DestinationID
+	selection  catalog.SpriteEndpointSelection
 }
 
 type installSpriteHerdrDone struct {
@@ -106,31 +176,61 @@ func (m Model) updateSpriteInstallConfirmation(msg tea.KeyPressMsg) (tea.Model, 
 }
 
 func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.Cmd) {
-	if msg.opID != m.operation.id || (m.sessions.phase != sessionsLoading && m.sessions.phase != sessionsRefreshing) {
+	if msg.opID != m.operation.id || (m.sessions.phase != sessionsLoading && m.sessions.phase != sessionsRefreshing && m.sessions.phase != sessionsInstallingHerdr) {
 		return m, nil
 	}
-	initial := m.sessions.phase == sessionsLoading
+	refreshing := m.sessions.phase == sessionsRefreshing
+	selected := m.sessions.selection
+	if !refreshing {
+		selected = ""
+	}
 	m.cancelOperation()
-	if errors.Is(msg.err, catalog.ErrSpriteHerdrMissing) {
+	m.applySpriteSessions(cachedSpriteSessions{endpointID: m.sessions.spriteEndpoint.ID, rows: msg.rows, err: msg.err}, refreshing, selected)
+	return m, nil
+}
+
+func (m *Model) applySpriteSessions(cached cachedSpriteSessions, preserve bool, selected catalog.DestinationID) {
+	if !preserve {
+		m.browser.ResetFilter()
+	}
+	if cached.err == nil || errors.Is(cached.err, catalog.ErrSpriteHerdrMissing) {
+		m.sessions.store(cached)
+	}
+	if errors.Is(cached.err, catalog.ErrSpriteHerdrMissing) {
 		m.sessions.spriteSnapshotDetail = sourceSnapshot{}
 		m.refreshNotice = ""
 		m.showSessions(sessionsConfirmingInstall)
 		m.syncSpriteItems("")
-		return m, nil
+		return
 	}
-	if msg.err != nil {
-		m.sessions.invalidate()
-		m.refreshNotice = "Sprite session refresh failed: " + printable(msg.err.Error())
+	if cached.err != nil {
+		if preserve {
+			m.sessions.invalidate()
+		} else {
+			m.sessions.spriteSnapshotDetail = sourceSnapshot{}
+		}
+		m.refreshNotice = "Sprite session refresh failed: " + printable(cached.err.Error())
 	} else {
-		m.sessions.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), msg.rows...), loaded: true, current: true}
+		m.sessions.spriteSnapshotDetail = sourceSnapshot{rows: append([]catalog.Destination(nil), cached.rows...), loaded: true, current: true}
 		m.refreshNotice = ""
 	}
 	m.showSessions(sessionsReady)
-	selected := m.sessions.selection
-	if initial {
-		selected = ""
-	}
 	m.syncSpriteItems(selected)
+}
+
+func (m Model) updateSpriteSessionsPrefetched(msg spriteSessionsPrefetched) (tea.Model, tea.Cmd) {
+	if msg.prefetchID != m.sessions.prefetchID {
+		return m, nil
+	}
+	if m.sessions.prefetchCancel != nil {
+		m.sessions.prefetchCancel()
+		m.sessions.prefetchCancel = nil
+	}
+	for _, cached := range msg.results {
+		if m.eagerSpriteCurrent(cached.endpointID) {
+			m.sessions.store(cached)
+		}
+	}
 	return m, nil
 }
 
@@ -144,7 +244,7 @@ func (m Model) updateInstallSpriteHerdrDone(msg installSpriteHerdrDone) (tea.Mod
 		m.showSessions(sessionsReady)
 		return m, nil
 	}
-	m.showSessions(sessionsLoading)
+	m.clearSessionCache()
 	cmd := m.beginSpriteSessions()
 	return m, tea.Batch(cmd, m.spinner.Tick)
 }
@@ -179,6 +279,57 @@ func (m *Model) beginSpriteRefresh() tea.Cmd {
 	m.showSessions(sessionsRefreshing)
 	cmd := m.beginSpriteSessions()
 	return tea.Batch(cmd, m.spinner.Tick)
+}
+
+func (m *Model) beginWarmSessionPrefetch() tea.Cmd {
+	operations, ok := m.operations.(spriteOperations)
+	if !ok || !m.home.spriteSnapshot.current || m.sessions.prefetchCancel != nil {
+		return nil
+	}
+	targets := make([]spriteSessionPrefetchTarget, 0, len(m.home.spriteSnapshot.rows))
+	for _, destination := range m.home.spriteSnapshot.rows {
+		if !eagerSprite(destination) {
+			continue
+		}
+		if _, cached := m.sessions.cached(destination.ID); cached {
+			continue
+		}
+		selection, err := catalog.SelectSpriteEndpoint(destination)
+		if err != nil {
+			continue
+		}
+		targets = append(targets, spriteSessionPrefetchTarget{endpointID: destination.ID, selection: selection})
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	m.sessions.prefetchID++
+	prefetchID := m.sessions.prefetchID
+	ctx, cancel := context.WithCancel(m.root)
+	m.sessions.prefetchCancel = cancel
+	return func() tea.Msg {
+		results := make([]cachedSpriteSessions, len(targets))
+		var workers sync.WaitGroup
+		workers.Add(len(targets))
+		for index, target := range targets {
+			go func() {
+				defer workers.Done()
+				rows, err := operations.ListSpriteSessions(ctx, target.selection)
+				results[index] = cachedSpriteSessions{endpointID: target.endpointID, rows: append([]catalog.Destination(nil), rows...), err: err}
+			}()
+		}
+		workers.Wait()
+		return spriteSessionsPrefetched{prefetchID: prefetchID, results: results}
+	}
+}
+
+func (m *Model) cancelSessionPrefetch() {
+	if m.sessions.prefetchCancel == nil {
+		return
+	}
+	m.sessions.prefetchCancel()
+	m.sessions.prefetchCancel = nil
+	m.sessions.prefetchID++
 }
 
 func (m Model) sessionsView(width, height int) string {

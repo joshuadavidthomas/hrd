@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -57,6 +58,12 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case homeLoading, homeCreatingSprite:
 		return m, nil
+	case homeOpeningSprite:
+		if msg.String() == "esc" {
+			m.cancelOperation()
+			return m, m.returnToEndpoints()
+		}
+		return m, nil
 	case homeReady:
 	default:
 		panic("ui: invalid Home phase")
@@ -66,6 +73,7 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.refreshNotice = ""
 		if m.home.inventoryRefreshing {
 			m.home.inventoryRefreshVisible = true
+			m.clearSessionCache()
 			return m, m.spinner.Tick
 		}
 		return m, tea.Batch(m.beginInventory(), m.spinner.Tick)
@@ -96,9 +104,17 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.sessions.open(destination, selection)
 			m.home.invalidateSprites()
-			m.showSessions(sessionsLoading)
-			m.browser.ResetFilter()
-			m.browser.SetItems(nil)
+			if cached, ok := m.sessions.cached(destination.ID); ok && eagerSprite(destination) {
+				if cached.err == nil || errors.Is(cached.err, catalog.ErrSpriteHerdrMissing) {
+					m.cancelSessionPrefetch()
+					m.applySpriteSessions(cached, false, "")
+					return m, nil
+				}
+				delete(m.sessions.cache, destination.ID)
+			}
+			m.cancelSessionPrefetch()
+			m.showHome(homeOpeningSprite)
+			m.sessions.phase = sessionsLoading
 			return m, tea.Batch(m.beginSpriteSessions(), m.spinner.Tick)
 		}
 		return m, tea.Batch(m.beginPrepareLocal(destination), m.spinner.Tick)
@@ -139,6 +155,7 @@ func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
 	m.home.localSnapshot = refreshSnapshot(m.home.localSnapshot, msg.inventory.Local)
 	m.home.spriteSnapshot = refreshSnapshot(m.home.spriteSnapshot, msg.inventory.Sprites)
 	m.home.destinations = append(append([]catalog.Destination(nil), m.home.localSnapshot.rows...), m.home.spriteSnapshot.rows...)
+	m.reconcileSessionCache()
 	if showFeedback {
 		m.refreshNotice = inventoryNotice(msg.inventory, wasInitial)
 	}
@@ -162,7 +179,7 @@ func (m Model) updateInventoryDone(msg inventoryDone) (tea.Model, tea.Cmd) {
 		m.home.selectSprite = ""
 	}
 	m.syncEndpointItems(selected)
-	return m, nil
+	return m, m.beginWarmSessionPrefetch()
 }
 
 func refreshSnapshot(previous sourceSnapshot, result catalog.SourceResult) sourceSnapshot {
@@ -227,6 +244,9 @@ func (m *Model) beginSilentInventory() tea.Cmd {
 }
 
 func (m *Model) beginInventoryWithFeedback(visible bool) tea.Cmd {
+	if visible && m.home.phase != homeLoading {
+		m.clearSessionCache()
+	}
 	opID, ctx := m.beginOperation()
 	if m.home.phase != homeLoading {
 		m.home.inventoryRefreshing = true
@@ -276,7 +296,7 @@ func (m Model) homeView(width, height int) string {
 		}, "\n"), width, height)
 	case homeCreatingSprite:
 		return m.busyLine("Creating "+m.nameInput.Value()+"…", width)
-	case homeReady:
+	case homeOpeningSprite, homeReady:
 		if len(m.browser.Items()) == 0 {
 			return "No local sessions or Sprite endpoints found."
 		}
