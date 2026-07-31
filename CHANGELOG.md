@@ -14,6 +14,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added native Sprite terminal and managed SSH transports.
 - Added confirmed Herdr installation and explicit `never`, `install`, and `open` config-sync policies.
 - Added Linux and macOS release archives for amd64 and arm64 with checksums and build-provenance attestations.
+- Added a checksum-verifying install script with optional build-provenance verification.
 - Added Homebrew distribution through `joshuadavidthomas/homebrew-homebrew`.
 
 ### Fixed

@@ -68,6 +68,9 @@ jobs:
       - name: Check go.mod and go.sum
         run: go mod tidy -diff
 
+      - name: Check installer syntax
+        run: sh -n install.sh
+
       - name: Build
         run: go build ./cmd/hrd
 

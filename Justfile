@@ -32,6 +32,10 @@ vet:
 lint:
     pre-commit run --all-files
 
+# Check the installer syntax
+install-check:
+    sh -n install.sh
+
 # Check dependencies for known vulnerabilities
 vuln:
     govulncheck ./...
@@ -45,4 +49,4 @@ release-check:
     goreleaser release --snapshot --clean
 
 # Run all local checks
-check: fmt-check test vet lint vuln tidy-check build release-check
+check: fmt-check test vet lint install-check vuln tidy-check build release-check

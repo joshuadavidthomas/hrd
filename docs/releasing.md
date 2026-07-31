@@ -12,7 +12,7 @@ Each release contains:
 - `hrd_darwin_arm64.tar.gz`
 - `checksums.txt`
 
-The archives also contain `README.md` and `LICENSE`. GitHub stores a signed build-provenance attestation for each file listed in `checksums.txt`. The release workflow also publishes `hrd` to the [`joshuadavidthomas/homebrew-homebrew`](https://github.com/joshuadavidthomas/homebrew-homebrew) tap.
+The archives also contain `install.sh`, `README.md`, and `LICENSE`. GitHub stores a signed build-provenance attestation for each file listed in `checksums.txt`. The release workflow also publishes `hrd` to the [`joshuadavidthomas/homebrew-homebrew`](https://github.com/joshuadavidthomas/homebrew-homebrew) tap.
 
 ## Repository setup
 
@@ -51,6 +51,7 @@ The workflow tests Linux and macOS, creates a draft GitHub release, attests its 
 gh release view v0.1.0 --repo joshuadavidthomas/hrd
 gh release download v0.1.0 --repo joshuadavidthomas/hrd
 gh attestation verify hrd_linux_amd64.tar.gz --repo joshuadavidthomas/hrd
+HRD_VERSION=v0.1.0 sh install.sh
 brew update
 brew install --cask joshuadavidthomas/homebrew/hrd
 hrd --version

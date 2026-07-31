@@ -23,6 +23,7 @@ archives:
       - hrd
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
     files:
+      - install.sh
       - LICENSE
       - README.md
 
