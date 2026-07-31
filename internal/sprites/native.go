@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	pathpkg "path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -318,11 +319,18 @@ func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, na
 }
 
 func readLocalHerdrConfig() ([]byte, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if configDir == "" {
+		var err error
+		configDir, err = os.UserConfigDir()
+		if err != nil {
+			return nil, errors.New("find local Herdr config failed")
+		}
+	}
+	if !filepath.IsAbs(configDir) {
 		return nil, errors.New("find local Herdr config failed")
 	}
-	configPath := pathpkg.Join(configDir, "herdr", "config.toml")
+	configPath := filepath.Join(configDir, "herdr", "config.toml")
 	info, err := os.Stat(configPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

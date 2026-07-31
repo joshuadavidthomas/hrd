@@ -21,7 +21,7 @@ import (
 
 func TestDiscoverCandidatesFindsOnePasswordSocket(t *testing.T) {
 	t.Parallel()
-	home := t.TempDir()
+	home := shortTempDir(t)
 	dir := filepath.Join(home, ".1password")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -39,7 +39,7 @@ func TestDiscoverCandidatesFindsOnePasswordSocket(t *testing.T) {
 
 func TestManagerRequiresSelectionAndReturnsOnlyChosenKey(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	socket := filepath.Join(dir, "agent.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -111,7 +111,7 @@ func TestManagerRequiresSelectionAndReturnsOnlyChosenKey(t *testing.T) {
 
 func TestEmptyEnvironmentAgentFallsThroughToOnePassword(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	emptyKeyring := agent.NewKeyring()
 	emptyServer := startTestAgentServer(t, filepath.Join(dir, "empty.sock"), emptyKeyring)
 	defer emptyServer.close()
@@ -234,6 +234,16 @@ func TestWithEnvironmentReplacesSocket(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("environment has %d SSH_AUTH_SOCK entries, want 1: %#v", count, got)
 	}
+}
+
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "hrd-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 type testAgentServer struct {
