@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
+	"github.com/joshuadavidthomas/hrd/internal/config"
 	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
@@ -102,7 +103,7 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.notice = prepareFailureNotice(err)
 				return m, nil
 			}
-			m.sessions.open(destination, selection)
+			m.sessions.open(destination, selection, m.herdrConfigSync == config.HerdrConfigSyncOpen)
 			m.home.invalidateSprites()
 			var cached *cachedSpriteSessions
 			if result, ok := m.sessions.cached(destination.ID); ok && eagerSprite(destination) {
@@ -114,7 +115,7 @@ func (m Model) updateHomeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.cancelSessionPrefetch()
 			m.showHome(homeOpeningSprite)
 			m.sessions.phase = sessionsLoading
-			return m, tea.Batch(m.beginSpriteSessions(true, cached), m.spinner.Tick)
+			return m, tea.Batch(m.beginSpriteSessions(m.sessions.configSyncPending, cached, nil), m.spinner.Tick)
 		}
 		return m, tea.Batch(m.beginPrepareLocal(destination), m.spinner.Tick)
 	}

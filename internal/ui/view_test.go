@@ -312,7 +312,7 @@ func TestSelectableRowsShareArrowWithoutBackground(t *testing.T) {
 	}
 	browserRow := renderBrowserRow(item, true, 48)
 	transportRow := renderTransportOption("Native", "recommended", "Herdr runs inside the Sprite.", true, 48)
-	sshModel := New(context.Background(), &fakeOperations{})
+	sshModel := New(context.Background(), &fakeOperations{}, testConfigSync)
 	sshModel.setSSHKeyChoices([]catalog.SSHIdentity{{Comment: "Work key", Algorithm: "ssh-ed25519"}})
 	sshRows := sshModel.sshKeyView(48)
 	for name, rendered := range map[string]string{"browser": browserRow, "transport": transportRow, "SSH": sshRows} {
@@ -376,7 +376,7 @@ func TestBrowserLayoutUsesCompactSpacingAndConditionalPagination(t *testing.T) {
 }
 
 func TestSpinnerProgressesAcrossBusyState(t *testing.T) {
-	model := New(context.Background(), &fakeOperations{})
+	model := New(context.Background(), &fakeOperations{}, testConfigSync)
 	model.showHome(homeCreatingSprite)
 	model.nameInput.SetValue("new-sprite")
 	before := model.spinner.View()

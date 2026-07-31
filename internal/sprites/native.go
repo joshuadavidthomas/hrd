@@ -98,28 +98,21 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 }
 
 // PrepareHerdr installs or verifies the fixed Herdr executable on a Sprite.
-func (c *Client) PrepareHerdr(ctx context.Context, name string) error {
+// The result reports whether this call ran the installer.
+func (c *Client) PrepareHerdr(ctx context.Context, name string) (bool, error) {
 	if c == nil {
-		return errors.New("Sprite access is disabled")
+		return false, errors.New("Sprite access is disabled")
 	}
 	if err := ValidName(name); err != nil {
-		return err
+		return false, err
 	}
 	if !c.beginNativePreparation() {
-		return context.Canceled
+		return false, context.Canceled
 	}
 	defer c.nativeWait.Done()
 	ctx, cancel := context.WithTimeout(ctx, prepareTimeout)
 	defer cancel()
-	var config []byte
-	if c.readHerdrConfig != nil {
-		var err error
-		config, err = c.readHerdrConfig()
-		if err != nil {
-			return err
-		}
-	}
-	return prepareNativeExecutable(ctx, c.commandRunner(), name, config)
+	return prepareNativeExecutable(ctx, c.commandRunner(), name)
 }
 
 // SyncHerdrConfig copies the local Herdr config to an existing Sprite without
@@ -281,25 +274,25 @@ func (c *Client) beginNativePreparation() bool {
 	return true
 }
 
-func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, name string, config []byte) error {
+func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, name string) (bool, error) {
 	installed, err := herdrInstalled(ctx, runner, name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if installed {
 		if err := runNativeVersion(ctx, runner, name); err != nil {
-			return err
+			return false, err
 		}
-		return copyHerdrConfig(ctx, runner, name, config)
+		return false, nil
 	}
 
 	output, err := runner.Run(ctx, name, nativeCommandSpec{path: "/usr/bin/mktemp", outputLimit: nativeOutputMax})
 	if err != nil {
-		return nativeStepErrorWithContext(ctx, "create installer temporary file", err)
+		return false, nativeStepErrorWithContext(ctx, "create installer temporary file", err)
 	}
 	tempPath, err := validInstallerTempPath(output)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	installErr := runNativeInstall(ctx, runner, name, tempPath)
@@ -307,15 +300,15 @@ func prepareNativeExecutable(ctx context.Context, runner nativeCommandRunner, na
 	_, cleanupErr := runner.Run(cleanupCtx, name, nativeCommandSpec{path: "/bin/rm", args: []string{"-f", tempPath}})
 	cleanupCancel()
 	if installErr != nil {
-		return installErr
+		return false, installErr
 	}
 	if cleanupErr != nil {
-		return nativeStepError("remove installer temporary file", cleanupErr)
+		return true, nativeStepError("remove installer temporary file", cleanupErr)
 	}
 	if err := runNativeVersion(ctx, runner, name); err != nil {
-		return err
+		return true, err
 	}
-	return copyHerdrConfig(ctx, runner, name, config)
+	return true, nil
 }
 
 func readLocalHerdrConfig() ([]byte, error) {

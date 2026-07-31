@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
+	"github.com/joshuadavidthomas/hrd/internal/config"
 	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
@@ -41,7 +42,7 @@ type Operations interface {
 type spriteOperations interface {
 	Create(context.Context, string) spriteapi.CreateResult
 	ListSpriteSessions(context.Context, catalog.SpriteEndpointSelection) ([]catalog.Destination, error)
-	InstallSpriteHerdr(context.Context, catalog.SpriteEndpointSelection) error
+	InstallSpriteHerdr(context.Context, catalog.SpriteEndpointSelection) (bool, error)
 	SyncSpriteHerdrConfig(context.Context, catalog.SpriteEndpointSelection) error
 	StopSpriteSession(context.Context, catalog.SpriteSessionSelection) error
 	PrepareSprite(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport) (catalog.PreparedAttach, error)
@@ -133,11 +134,12 @@ func newKeyMap() keyMap {
 }
 
 type Model struct {
-	root        context.Context
-	operations  Operations
-	execProcess func(*exec.Cmd, tea.ExecCallback) tea.Cmd
-	execCommand func(tea.ExecCommand, tea.ExecCallback) tea.Cmd
-	keys        keyMap
+	root            context.Context
+	operations      Operations
+	execProcess     func(*exec.Cmd, tea.ExecCallback) tea.Cmd
+	execCommand     func(tea.ExecCommand, tea.ExecCallback) tea.Cmd
+	keys            keyMap
+	herdrConfigSync config.HerdrConfigSync
 
 	active workflow
 	width  int
@@ -167,12 +169,15 @@ type Model struct {
 }
 
 // New creates a model and schedules the first inventory read.
-func New(root context.Context, operations Operations) Model {
+func New(root context.Context, operations Operations, herdrConfigSync config.HerdrConfigSync) Model {
 	if root == nil {
 		panic("ui: nil root context")
 	}
 	if operations == nil {
 		panic("ui: nil operations")
+	}
+	if herdrConfigSync < config.HerdrConfigSyncNever || herdrConfigSync > config.HerdrConfigSyncOpen {
+		panic("ui: invalid Herdr config sync policy")
 	}
 
 	browser := newBrowserList(defaultWidth-6, 12, true)
@@ -199,6 +204,7 @@ func New(root context.Context, operations Operations) Model {
 		execProcess:     tea.ExecProcess,
 		execCommand:     tea.Exec,
 		keys:            newKeyMap(),
+		herdrConfigSync: herdrConfigSync,
 		active:          workflowHome,
 		width:           defaultWidth,
 		height:          defaultHeight,

@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/term"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
+	"github.com/joshuadavidthomas/hrd/internal/config"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
 	"github.com/joshuadavidthomas/hrd/internal/sprites"
 	"github.com/joshuadavidthomas/hrd/internal/sshagent"
@@ -69,6 +70,11 @@ func run(args []string, stdout, stderr *os.File) int {
 		_, _ = fmt.Fprintf(stderr, "hrd: %v\n", err)
 		return 1
 	}
+	settings, err := config.Load()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "hrd: %v\n", err)
+		return 1
+	}
 
 	root, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -93,7 +99,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		screen = newScreenOutput(stdout)
 		programOutput = screen
 	}
-	program := tea.NewProgram(ui.New(root, operations), tea.WithContext(root), tea.WithOutput(programOutput))
+	program := tea.NewProgram(ui.New(root, operations, settings.HerdrConfigSync), tea.WithContext(root), tea.WithOutput(programOutput))
 	_, runErr := program.Run()
 	var restoreErr error
 	if screen != nil {

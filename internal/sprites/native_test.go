@@ -264,8 +264,9 @@ func TestPrepareNativeHasNoRemotePreparationEffects(t *testing.T) {
 
 func TestPrepareHerdrExistingExecutableSkipsInstall(t *testing.T) {
 	runner := &fakeNativeRunner{}
-	if err := nativePreparationClient(t, runner).PrepareHerdr(context.Background(), "sprite-one"); err != nil {
-		t.Fatalf("PrepareHerdr() error = %v", err)
+	installed, err := nativePreparationClient(t, runner).PrepareHerdr(context.Background(), "sprite-one")
+	if err != nil || installed {
+		t.Fatalf("PrepareHerdr() = (%v, %v), want (false, nil)", installed, err)
 	}
 	want := []nativeCommandSpec{
 		{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}},
@@ -276,36 +277,12 @@ func TestPrepareHerdrExistingExecutableSkipsInstall(t *testing.T) {
 	}
 }
 
-func TestPrepareHerdrCopiesLocalConfigAtomically(t *testing.T) {
-	config := []byte("theme = \"catppuccin\"\n")
-	runner := &fakeNativeRunner{run: func(_ context.Context, _ nativeCommandSpec, index int) (string, error) {
-		if index == 3 {
-			return "/home/sprite/.config/herdr/config.toml.tmp.ABC123\n", nil
-		}
-		return "", nil
-	}}
+func TestPrepareHerdrDoesNotReadLocalConfig(t *testing.T) {
+	runner := &fakeNativeRunner{}
 	client := nativePreparationClient(t, runner)
-	client.readHerdrConfig = func() ([]byte, error) { return config, nil }
-	if err := client.PrepareHerdr(context.Background(), "sprite-one"); err != nil {
+	client.readHerdrConfig = func() ([]byte, error) { return nil, errors.New("must not read config") }
+	if _, err := client.PrepareHerdr(context.Background(), "sprite-one"); err != nil {
 		t.Fatalf("PrepareHerdr() error = %v", err)
-	}
-	const (
-		configDir  = "/home/sprite/.config/herdr"
-		tempPath   = configDir + "/config.toml.tmp.ABC123"
-		configPath = configDir + "/config.toml"
-	)
-	want := []nativeCommandSpec{
-		{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}},
-		{path: nativeExecutable, args: []string{"--version"}},
-		{path: "/usr/bin/install", args: []string{"-d", "-m", "0700", configDir}},
-		{path: "/usr/bin/mktemp", args: []string{configDir + "/config.toml.tmp.XXXXXX"}, outputLimit: nativeOutputMax},
-		{path: "/usr/bin/tee", args: []string{tempPath}, stdin: config},
-		{path: "/bin/chmod", args: []string{"0600", tempPath}},
-		{path: "/bin/mv", args: []string{"-fT", tempPath, configPath}},
-		{path: "/bin/rm", args: []string{"-f", tempPath}},
-	}
-	if got := runner.specs(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("commands = %#v, want %#v", got, want)
 	}
 }
 
@@ -322,19 +299,30 @@ func TestSyncHerdrConfigDoesNotInstallOrVerifyHerdr(t *testing.T) {
 	if err := client.SyncHerdrConfig(context.Background(), "sprite-one"); err != nil {
 		t.Fatalf("SyncHerdrConfig() error = %v", err)
 	}
-	for _, spec := range runner.specs() {
-		if spec.path == nativeExecutable || spec.path == "/usr/bin/curl" || spec.path == "/bin/sh" {
-			t.Fatalf("SyncHerdrConfig() ran Herdr setup command %#v", spec)
-		}
+	const (
+		configDir  = "/home/sprite/.config/herdr"
+		tempPath   = configDir + "/config.toml.tmp.ABC123"
+		configPath = configDir + "/config.toml"
+	)
+	want := []nativeCommandSpec{
+		{path: "/usr/bin/install", args: []string{"-d", "-m", "0700", configDir}},
+		{path: "/usr/bin/mktemp", args: []string{configDir + "/config.toml.tmp.XXXXXX"}, outputLimit: nativeOutputMax},
+		{path: "/usr/bin/tee", args: []string{tempPath}, stdin: config},
+		{path: "/bin/chmod", args: []string{"0600", tempPath}},
+		{path: "/bin/mv", args: []string{"-fT", tempPath, configPath}},
+		{path: "/bin/rm", args: []string{"-f", tempPath}},
+	}
+	if got := runner.specs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
 	}
 }
 
-func TestPrepareHerdrConfigReadFailureStopsBeforeRemoteCommands(t *testing.T) {
+func TestSyncHerdrConfigMissingLocalConfigDoesNothing(t *testing.T) {
 	runner := &fakeNativeRunner{}
 	client := nativePreparationClient(t, runner)
-	client.readHerdrConfig = func() ([]byte, error) { return nil, errors.New("local read failed") }
-	if err := client.PrepareHerdr(context.Background(), "sprite-one"); err == nil {
-		t.Fatal("PrepareHerdr() succeeded, want config read failure")
+	client.readHerdrConfig = func() ([]byte, error) { return nil, nil }
+	if err := client.SyncHerdrConfig(context.Background(), "sprite-one"); err != nil {
+		t.Fatalf("SyncHerdrConfig() error = %v", err)
 	}
 	if got := runner.specs(); len(got) != 0 {
 		t.Fatalf("commands = %#v, want none", got)
@@ -396,8 +384,9 @@ func TestPrepareHerdrMissingExecutableRunsFixedSequence(t *testing.T) {
 		}
 	}}
 	client := nativePreparationClient(t, runner)
-	if err := client.PrepareHerdr(context.Background(), "sprite-one"); err != nil {
-		t.Fatalf("PrepareHerdr() error = %v", err)
+	installed, err := client.PrepareHerdr(context.Background(), "sprite-one")
+	if err != nil || !installed {
+		t.Fatalf("PrepareHerdr() = (%v, %v), want (true, nil)", installed, err)
 	}
 	want := []nativeCommandSpec{
 		{path: "/usr/bin/test", args: []string{"-x", nativeExecutable}},
@@ -409,6 +398,29 @@ func TestPrepareHerdrMissingExecutableRunsFixedSequence(t *testing.T) {
 	}
 	if got := runner.specs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareHerdrReportsInstallerRanWhenLaterStepFails(t *testing.T) {
+	for _, failurePath := range []string{"/bin/rm", nativeExecutable} {
+		t.Run(failurePath, func(t *testing.T) {
+			runner := &fakeNativeRunner{run: func(_ context.Context, spec nativeCommandSpec, index int) (string, error) {
+				switch index {
+				case 0:
+					return "", fakeExitError(1)
+				case 1:
+					return "/tmp/install-file\n", nil
+				}
+				if spec.path == failurePath {
+					return "", errors.New("later step failed")
+				}
+				return "", nil
+			}}
+			installed, err := nativePreparationClient(t, runner).PrepareHerdr(context.Background(), "sprite-one")
+			if err == nil || !installed {
+				t.Fatalf("PrepareHerdr() = (%v, %v), want (true, error)", installed, err)
+			}
+		})
 	}
 }
 
@@ -431,7 +443,7 @@ func TestPrepareHerdrFailuresCleanUpAndStaySanitized(t *testing.T) {
 			}}
 			client := nativePreparationClient(t, runner)
 			client.token = token
-			err := client.PrepareHerdr(context.Background(), "sprite-one")
+			_, err := client.PrepareHerdr(context.Background(), "sprite-one")
 			if err == nil {
 				t.Fatal("PrepareHerdr() succeeded, want failure")
 			}
@@ -469,7 +481,7 @@ func TestPrepareHerdrRejectsUnsafeTemporaryPathsWithoutUsingThem(t *testing.T) {
 				}
 				return path + "\n", nil
 			}}
-			err := nativePreparationClient(t, runner).PrepareHerdr(context.Background(), "sprite-one")
+			_, err := nativePreparationClient(t, runner).PrepareHerdr(context.Background(), "sprite-one")
 			if err == nil {
 				t.Fatal("PrepareHerdr() succeeded for unsafe path")
 			}
@@ -498,7 +510,7 @@ func TestPrepareHerdrCleansUpAfterCancellation(t *testing.T) {
 		}
 		return "", nil
 	}}
-	err := nativePreparationClient(t, runner).PrepareHerdr(ctx, "sprite-one")
+	_, err := nativePreparationClient(t, runner).PrepareHerdr(ctx, "sprite-one")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("PrepareHerdr() error = %v, want context.Canceled", err)
 	}
@@ -536,7 +548,8 @@ func TestClientCloseWaitsForCanceledNativePreparationCleanup(t *testing.T) {
 	client := &Client{root: root, token: "token", nativeRunner: runner, nativeDeps: productionNativeDependencies(), closed: make(chan struct{}), bridges: make(map[*bridge]struct{})}
 	prepareDone := make(chan error, 1)
 	go func() {
-		prepareDone <- client.PrepareHerdr(root, "sprite-one")
+		_, err := client.PrepareHerdr(root, "sprite-one")
+		prepareDone <- err
 	}()
 	<-curlStarted
 	cancel()
@@ -560,7 +573,7 @@ func TestClientCloseWaitsForCanceledNativePreparationCleanup(t *testing.T) {
 	if err := <-prepareDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("PrepareHerdr() error = %v, want context.Canceled", err)
 	}
-	if err := client.PrepareHerdr(context.Background(), "sprite-one"); !errors.Is(err, context.Canceled) {
+	if _, err := client.PrepareHerdr(context.Background(), "sprite-one"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("PrepareHerdr() after Close error = %v, want context.Canceled", err)
 	}
 }

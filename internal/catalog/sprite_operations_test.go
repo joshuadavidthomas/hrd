@@ -21,9 +21,9 @@ func (f *fakeSpriteOperationBackend) HerdrInstalled(context.Context, string) (bo
 	return f.installed, nil
 }
 
-func (f *fakeSpriteOperationBackend) PrepareHerdr(context.Context, string) error {
+func (f *fakeSpriteOperationBackend) PrepareHerdr(context.Context, string) (bool, error) {
 	f.calls = append(f.calls, "install")
-	return nil
+	return true, nil
 }
 
 func (f *fakeSpriteOperationBackend) SyncHerdrConfig(context.Context, string) error {
@@ -95,8 +95,9 @@ func TestSpriteHerdrInstallAndInventoryAreSeparateOperations(t *testing.T) {
 	}
 
 	backend.calls = nil
-	if err := operations.InstallSpriteHerdr(context.Background(), endpoint); err != nil {
-		t.Fatalf("InstallSpriteHerdr() error = %v", err)
+	installed, err := operations.InstallSpriteHerdr(context.Background(), endpoint)
+	if err != nil || !installed {
+		t.Fatalf("InstallSpriteHerdr() = (%v, %v), want (true, nil)", installed, err)
 	}
 	if want := []string{"install"}; !reflect.DeepEqual(backend.calls, want) {
 		t.Fatalf("install calls = %#v, want %#v", backend.calls, want)

@@ -326,7 +326,7 @@ func PrepareSpriteSSH(name, session string, prepared spriteapi.Prepared) (Prepar
 
 type spriteOperationBackend interface {
 	HerdrInstalled(context.Context, string) (bool, error)
-	PrepareHerdr(context.Context, string) error
+	PrepareHerdr(context.Context, string) (bool, error)
 	SyncHerdrConfig(context.Context, string) error
 	ListHerdrSessions(context.Context, string) ([]herdr.Session, error)
 	StopHerdrSession(context.Context, string, string) error
@@ -475,13 +475,13 @@ func (o *SpriteOperations) ListSpriteSessions(ctx context.Context, endpoint Spri
 }
 
 // InstallSpriteHerdr explicitly runs the Herdr preparation and installer flow.
-func (o *SpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint SpriteEndpointSelection) error {
+func (o *SpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint SpriteEndpointSelection) (bool, error) {
 	if err := endpoint.validate(); err != nil {
-		return err
+		return false, err
 	}
 	backend, err := o.operationBackend()
 	if err != nil {
-		return err
+		return false, err
 	}
 	return backend.PrepareHerdr(ctx, endpoint.name)
 }

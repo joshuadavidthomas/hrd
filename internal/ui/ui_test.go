@@ -14,9 +14,12 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
+	"github.com/joshuadavidthomas/hrd/internal/config"
 	"github.com/joshuadavidthomas/hrd/internal/herdr"
 	"github.com/joshuadavidthomas/hrd/internal/sprites"
 )
+
+const testConfigSync = config.HerdrConfigSyncOpen
 
 type fakeOperations struct {
 	inventoryCalls atomic.Int32
@@ -56,7 +59,7 @@ type fakeSpriteOperations struct {
 	inventoryFn        func(context.Context, int) catalog.Inventory
 	createFn           func(context.Context, string, int) sprites.CreateResult
 	listSpriteFn       func(context.Context, catalog.SpriteEndpointSelection, int) ([]catalog.Destination, error)
-	installFn          func(context.Context, catalog.SpriteEndpointSelection, int) error
+	installFn          func(context.Context, catalog.SpriteEndpointSelection, int) (bool, error)
 	syncConfigFn       func(context.Context, catalog.SpriteEndpointSelection, int) error
 	stopFn             func(context.Context, catalog.SpriteSessionSelection, int) error
 	prepareSpriteFn    func(context.Context, catalog.SpriteSessionSelection, catalog.SpriteTransport, int) (catalog.PreparedAttach, error)
@@ -93,12 +96,12 @@ func (f *fakeSpriteOperations) ListSpriteSessions(ctx context.Context, endpoint 
 	return spriteSessionRows("devbox", sprites.Running), nil
 }
 
-func (f *fakeSpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint catalog.SpriteEndpointSelection) error {
+func (f *fakeSpriteOperations) InstallSpriteHerdr(ctx context.Context, endpoint catalog.SpriteEndpointSelection) (bool, error) {
 	call := int(f.installCalls.Add(1))
 	if f.installFn != nil {
 		return f.installFn(ctx, endpoint, call)
 	}
-	return nil
+	return true, nil
 }
 
 func (f *fakeSpriteOperations) SyncSpriteHerdrConfig(ctx context.Context, endpoint catalog.SpriteEndpointSelection) error {
@@ -143,7 +146,7 @@ func (*fakeTerminalCommand) SetStdout(io.Writer) {}
 func (*fakeTerminalCommand) SetStderr(io.Writer) {}
 
 func TestBackgroundColorUpdatesCharmStyles(t *testing.T) {
-	model := New(context.Background(), &fakeOperations{})
+	model := New(context.Background(), &fakeOperations{}, testConfigSync)
 	model, _ = update(t, model, tea.BackgroundColorMsg{Color: color.RGBA{R: 255, G: 255, B: 255, A: 255}})
 	if model.isDark {
 		t.Fatal("white terminal background was classified as dark")
@@ -155,7 +158,7 @@ func TestBackgroundColorUpdatesCharmStyles(t *testing.T) {
 
 func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 	ops := &fakeOperations{}
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	if model.home.phase != homeLoading || model.operation.id != 1 || len(model.browser.Items()) != 0 {
 		t.Fatalf("new model phase/id/items = %v/%d/%d", model.active, model.operation.id, len(model.browser.Items()))
 	}
@@ -179,7 +182,7 @@ func TestInitialAsyncLoadUsesBubblesList(t *testing.T) {
 
 func TestActiveWorkflowOwnsItsPhase(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	if model.active != workflowHome || model.home.phase != homeLoading {
 		t.Fatalf("initial workflow/phase = %v/%v", model.active, model.home.phase)
 	}
@@ -202,7 +205,7 @@ func TestActiveWorkflowOwnsItsPhase(t *testing.T) {
 
 func ready(t *testing.T, operations Operations) Model {
 	t.Helper()
-	model := New(context.Background(), operations)
+	model := New(context.Background(), operations, testConfigSync)
 	model, _ = update(t, model, run(t, model.initialCmd))
 	if !model.ready() {
 		t.Fatalf("initial load phase = %v, notice %q", model.active, model.notice)

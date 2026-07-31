@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
+	"github.com/joshuadavidthomas/hrd/internal/config"
 	"github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
@@ -22,7 +23,7 @@ func TestWarmSpritesPrefetchSessionsAndOpenFromCache(t *testing.T) {
 			ops.inventoryFn = func(context.Context, int) catalog.Inventory {
 				return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", state)}}
 			}
-			model := New(context.Background(), ops)
+			model := New(context.Background(), ops, testConfigSync)
 			model, prefetch := update(t, model, run(t, model.initialCmd))
 			if prefetch == nil || !model.ready() || ops.listSpriteCalls.Load() != 0 {
 				t.Fatalf("prefetch start = ready %v calls %d cmd %v", model.ready(), ops.listSpriteCalls.Load(), prefetch)
@@ -69,7 +70,7 @@ func TestWarmSessionPrefetchBatchesTargets(t *testing.T) {
 		return spriteSessionRows("beta", sprites.Warm), nil
 	}
 
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	model, prefetch := update(t, model, run(t, model.initialCmd))
 	batchMsg := run(t, prefetch)
 	batch, ok := batchMsg.(tea.BatchMsg)
@@ -114,7 +115,7 @@ func TestWarmPrefetchRequiresCurrentSpriteInventory(t *testing.T) {
 		}
 		return inventory
 	}
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	model, prefetch := update(t, model, run(t, model.initialCmd))
 	if prefetch == nil {
 		t.Fatal("warm Sprite did not begin prefetch")
@@ -132,7 +133,7 @@ func TestWarmPrefetchRequiresCurrentSpriteInventory(t *testing.T) {
 
 func TestExplicitRefreshClearsCacheDuringSilentRefresh(t *testing.T) {
 	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	model, prefetch := update(t, model, run(t, model.initialCmd))
 	model, _ = update(t, model, run(t, prefetch))
 	endpointID := spriteEndpointRows("devbox", sprites.Running)[0].ID
@@ -158,7 +159,7 @@ func TestRunningToColdInventoryRejectsOldPrefetch(t *testing.T) {
 		}
 		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", state)}}
 	}
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	model, oldPrefetch := update(t, model, run(t, model.initialCmd))
 	model, _ = update(t, model, run(t, model.beginSilentInventory()))
 	model, _ = update(t, model, run(t, oldPrefetch))
@@ -174,7 +175,7 @@ func TestColdSpriteStaysOnHomeUntilSessionsLoad(t *testing.T) {
 	ops.inventoryFn = func(context.Context, int) catalog.Inventory {
 		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Cold)}}
 	}
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	model, prefetch := update(t, model, run(t, model.initialCmd))
 	if prefetch != nil || ops.listSpriteCalls.Load() != 0 {
 		t.Fatalf("cold Sprite was prefetched: calls %d cmd %v", ops.listSpriteCalls.Load(), prefetch)
@@ -265,6 +266,153 @@ func TestSpriteDrillInLoadsOnlySelectedSpriteSessions(t *testing.T) {
 	}
 }
 
+func TestExistingSpriteConfigSyncFollowsPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		policy config.HerdrConfigSync
+		want   int32
+	}{
+		{name: "never", policy: config.HerdrConfigSyncNever},
+		{name: "install", policy: config.HerdrConfigSyncInstall},
+		{name: "open", policy: config.HerdrConfigSyncOpen, want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+			model := ready(t, ops)
+			model.herdrConfigSync = test.policy
+			model.browser.Select(2)
+			model, open := update(t, model, press("enter"))
+			model, _ = update(t, model, runFirst(t, open))
+			if got := ops.syncConfigCalls.Load(); got != test.want {
+				t.Fatalf("config sync calls = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestHerdrInstallConfigSyncFollowsPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		policy    config.HerdrConfigSync
+		installed bool
+		want      int32
+	}{
+		{name: "never", policy: config.HerdrConfigSyncNever, installed: true},
+		{name: "install", policy: config.HerdrConfigSyncInstall, installed: true, want: 1},
+		{name: "install no-op", policy: config.HerdrConfigSyncInstall},
+		{name: "open", policy: config.HerdrConfigSyncOpen, installed: true, want: 1},
+		{name: "open no-op", policy: config.HerdrConfigSyncOpen, want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+			ops.installFn = func(context.Context, catalog.SpriteEndpointSelection, int) (bool, error) {
+				return test.installed, nil
+			}
+			model := ready(t, ops)
+			model.herdrConfigSync = test.policy
+			endpoint := spriteEndpointRows("devbox", sprites.Running)[0]
+			selection, err := catalog.SelectSpriteEndpoint(endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model.sessions.open(endpoint, selection, false)
+			message := run(t, model.beginInstallSpriteHerdr())
+			result, ok := message.(installSpriteHerdrDone)
+			if !ok || result.err != nil || result.configSyncErr != nil {
+				t.Fatalf("install result = %#v", message)
+			}
+			if got := ops.syncConfigCalls.Load(); got != test.want {
+				t.Fatalf("config sync calls = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPostInstallErrorKeepsDefaultConfigSyncPending(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.installFn = func(context.Context, catalog.SpriteEndpointSelection, int) (bool, error) {
+		return true, errors.New("version check failed")
+	}
+	model := ready(t, ops)
+	model.herdrConfigSync = config.HerdrConfigSyncInstall
+	endpoint := spriteEndpointRows("devbox", sprites.Running)[0]
+	selection, err := catalog.SelectSpriteEndpoint(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.sessions.open(endpoint, selection, false)
+	model.showSessions(sessionsConfirmingInstall)
+	model, install := update(t, model, press("y"))
+	model, _ = update(t, model, runFirst(t, install))
+	if !model.sessions.configSyncPending || !strings.Contains(model.notice, "version check failed") {
+		t.Fatalf("post-install error = pending %v notice %q", model.sessions.configSyncPending, model.notice)
+	}
+
+	ops.installFn = nil
+	model, refresh := update(t, model, press("r"))
+	model, _ = update(t, model, runFirst(t, refresh))
+	if model.sessions.configSyncPending || ops.syncConfigCalls.Load() != 1 {
+		t.Fatalf("post-install retry = pending %v sync calls %d", model.sessions.configSyncPending, ops.syncConfigCalls.Load())
+	}
+}
+
+func TestStaleInstallSyncFailureRemainsPendingForEndpoint(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	model := ready(t, ops)
+	endpoint := spriteEndpointRows("devbox", sprites.Running)[0]
+	selection, err := catalog.SelectSpriteEndpoint(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.sessions.open(endpoint, selection, false)
+	model.showSessions(sessionsInstallingHerdr)
+	model.operation.id = 2
+	message := installSpriteHerdrDone{
+		opID:                1,
+		endpointID:          endpoint.ID,
+		configSyncErr:       context.Canceled,
+		configSyncAttempted: true,
+	}
+	model, _ = update(t, model, message)
+	model.sessions.open(endpoint, selection, false)
+	if !model.sessions.configSyncPending {
+		t.Fatal("stale install sync failure did not remain pending")
+	}
+}
+
+func TestInstallConfigSyncFailureRetriesAfterLeavingAndReopening(t *testing.T) {
+	ops := &fakeSpriteOperations{fakeOperations: &fakeOperations{}}
+	ops.syncConfigFn = func(_ context.Context, _ catalog.SpriteEndpointSelection, call int) error {
+		if call == 1 {
+			return errors.New("sync failed")
+		}
+		return nil
+	}
+	model := ready(t, ops)
+	model.herdrConfigSync = config.HerdrConfigSyncInstall
+	endpoint := spriteEndpointRows("devbox", sprites.Running)[0]
+	selection, err := catalog.SelectSpriteEndpoint(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.sessions.open(endpoint, selection, false)
+	model.showSessions(sessionsConfirmingInstall)
+	model, install := update(t, model, press("y"))
+	model, relist := update(t, model, runFirst(t, install))
+	model, _ = update(t, model, runFirst(t, relist))
+	if !model.sessions.configSyncPending || !strings.Contains(model.refreshNotice, "sync failed") {
+		t.Fatalf("failed install sync = pending %v notice %q", model.sessions.configSyncPending, model.refreshNotice)
+	}
+
+	model, _ = update(t, model, press("esc"))
+	model.browser.Select(2)
+	model, open := update(t, model, press("enter"))
+	model, _ = update(t, model, runFirst(t, open))
+	if model.sessions.configSyncPending || ops.syncConfigCalls.Load() != 2 {
+		t.Fatalf("reopened retry = pending %v sync calls %d", model.sessions.configSyncPending, ops.syncConfigCalls.Load())
+	}
+}
+
 func TestSpriteOpenRetriesPendingConfigSyncAfterFailure(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -340,8 +488,10 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 		t.Fatalf("missing Herdr phase/install calls = %v/%d", model.active, ops.installCalls.Load())
 	}
 	confirmation := ansi.Strip(model.bodyView(model.surfaceWidth(), model.height))
-	if !strings.Contains(confirmation, "Install Herdr?") {
-		t.Fatalf("install confirmation = %q", confirmation)
+	for _, want := range []string{"Install Herdr?", "local Herdr config will also be copied"} {
+		if !strings.Contains(confirmation, want) {
+			t.Fatalf("install confirmation lacks %q: %q", want, confirmation)
+		}
 	}
 	for _, unwanted := range []string{"devbox", "download", "install.sh", "three minutes"} {
 		if strings.Contains(confirmation, unwanted) {
@@ -382,8 +532,8 @@ func TestMissingHerdrRequiresExplicitInstallConfirmation(t *testing.T) {
 		t.Fatalf("install completion = phase %v calls %d cmd %v", model.sessions.phase, ops.installCalls.Load(), relist)
 	}
 	model, _ = update(t, model, runFirst(t, relist))
-	if !model.ready() || len(model.browser.Items()) != 2 {
-		t.Fatalf("post-install list = phase %v items %d", model.active, len(model.browser.Items()))
+	if !model.ready() || len(model.browser.Items()) != 2 || ops.syncConfigCalls.Load() != 1 {
+		t.Fatalf("post-install list/sync = phase %v items %d sync %d", model.active, len(model.browser.Items()), ops.syncConfigCalls.Load())
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/joshuadavidthomas/hrd/internal/catalog"
+	"github.com/joshuadavidthomas/hrd/internal/config"
 	spriteapi "github.com/joshuadavidthomas/hrd/internal/sprites"
 )
 
@@ -22,14 +23,33 @@ type sessionsState struct {
 	prefetchCancel          context.CancelFunc
 	prefetchRemaining       int
 	configSyncPending       bool
+	configSyncRetries       map[catalog.DestinationID]struct{}
 }
 
-func (s *sessionsState) open(endpoint catalog.Destination, selection catalog.SpriteEndpointSelection) {
+func (s *sessionsState) open(endpoint catalog.Destination, selection catalog.SpriteEndpointSelection, syncConfig bool) {
 	s.spriteEndpoint = endpoint
 	s.spriteEndpointSelection = selection
 	s.spriteSnapshotDetail = sourceSnapshot{}
 	s.selection = ""
-	s.configSyncPending = true
+	_, retryPending := s.configSyncRetries[endpoint.ID]
+	s.configSyncPending = syncConfig || retryPending
+}
+
+func (s *sessionsState) markConfigSyncPending(endpointID catalog.DestinationID) {
+	if s.configSyncRetries == nil {
+		s.configSyncRetries = make(map[catalog.DestinationID]struct{})
+	}
+	s.configSyncRetries[endpointID] = struct{}{}
+	if endpointID == s.spriteEndpoint.ID {
+		s.configSyncPending = true
+	}
+}
+
+func (s *sessionsState) clearConfigSyncPending(endpointID catalog.DestinationID) {
+	delete(s.configSyncRetries, endpointID)
+	if endpointID == s.spriteEndpoint.ID {
+		s.configSyncPending = false
+	}
 }
 
 func (s *sessionsState) invalidate() {
@@ -109,8 +129,13 @@ type spriteSessionPrefetchTarget struct {
 }
 
 type installSpriteHerdrDone struct {
-	opID uint64
-	err  error
+	opID                uint64
+	endpointID          catalog.DestinationID
+	err                 error
+	configSyncErr       error
+	configSyncRequired  bool
+	configSyncAttempted bool
+	configSynced        bool
 }
 
 func (m Model) updateSessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -190,7 +215,7 @@ func (m Model) updateSpriteSessionsDone(msg spriteSessionsDone) (tea.Model, tea.
 	}
 	m.cancelOperation()
 	if msg.configSynced {
-		m.sessions.configSyncPending = false
+		m.sessions.clearConfigSyncPending(m.sessions.spriteEndpoint.ID)
 	}
 	m.applySpriteSessions(cachedSpriteSessions{endpointID: m.sessions.spriteEndpoint.ID, rows: msg.rows, err: msg.err}, refreshing, selected)
 	if msg.err == nil && msg.configSyncErr != nil {
@@ -245,21 +270,29 @@ func (m Model) updateSpriteSessionsPrefetched(msg spriteSessionsPrefetched) (tea
 
 func (m Model) updateInstallSpriteHerdrDone(msg installSpriteHerdrDone) (tea.Model, tea.Cmd) {
 	if msg.opID != m.operation.id || m.sessions.phase != sessionsInstallingHerdr {
+		if (msg.configSyncRequired || msg.configSyncAttempted) && !msg.configSynced {
+			m.sessions.markConfigSyncPending(msg.endpointID)
+		}
 		return m, nil
 	}
 	m.cancelOperation()
+	if msg.configSyncRequired || msg.configSyncAttempted {
+		m.sessions.markConfigSyncPending(msg.endpointID)
+	}
+	if msg.configSynced {
+		m.sessions.clearConfigSyncPending(msg.endpointID)
+	}
 	if msg.err != nil {
 		m.notice = "Couldn’t install Herdr: " + printable(msg.err.Error())
 		m.showSessions(sessionsReady)
 		return m, nil
 	}
 	m.clearSessionCache()
-	m.sessions.configSyncPending = false
-	cmd := m.beginSpriteSessions(false, nil)
+	cmd := m.beginSpriteSessions(false, nil, msg.configSyncErr)
 	return m, tea.Batch(cmd, m.spinner.Tick)
 }
 
-func (m *Model) beginSpriteSessions(syncConfig bool, cached *cachedSpriteSessions) tea.Cmd {
+func (m *Model) beginSpriteSessions(syncConfig bool, cached *cachedSpriteSessions, priorConfigSyncErr error) tea.Cmd {
 	operations, ok := m.operations.(spriteOperations)
 	if !ok {
 		return nil
@@ -276,7 +309,7 @@ func (m *Model) beginSpriteSessions(syncConfig bool, cached *cachedSpriteSession
 			err = cached.err
 		}
 		configSynced := false
-		var configSyncErr error
+		configSyncErr := priorConfigSyncErr
 		if err == nil && syncConfig {
 			configSyncErr = operations.SyncSpriteHerdrConfig(ctx, selection)
 			configSynced = configSyncErr == nil
@@ -293,14 +326,25 @@ func (m *Model) beginInstallSpriteHerdr() tea.Cmd {
 	opID, ctx := m.beginOperation()
 	m.showSessions(sessionsInstallingHerdr)
 	selection := m.sessions.spriteEndpointSelection
+	endpointID := m.sessions.spriteEndpoint.ID
+	policy := m.herdrConfigSync
 	return func() tea.Msg {
-		return installSpriteHerdrDone{opID: opID, err: operations.InstallSpriteHerdr(ctx, selection)}
+		installed, err := operations.InstallSpriteHerdr(ctx, selection)
+		syncConfig := policy == config.HerdrConfigSyncOpen || (policy == config.HerdrConfigSyncInstall && installed)
+		if err != nil {
+			return installSpriteHerdrDone{opID: opID, endpointID: endpointID, err: err, configSyncRequired: syncConfig}
+		}
+		if !syncConfig {
+			return installSpriteHerdrDone{opID: opID, endpointID: endpointID}
+		}
+		err = operations.SyncSpriteHerdrConfig(ctx, selection)
+		return installSpriteHerdrDone{opID: opID, endpointID: endpointID, configSyncErr: err, configSyncRequired: true, configSyncAttempted: true, configSynced: err == nil}
 	}
 }
 
 func (m *Model) beginSpriteRefresh() tea.Cmd {
 	m.showSessions(sessionsRefreshing)
-	cmd := m.beginSpriteSessions(m.sessions.configSyncPending, nil)
+	cmd := m.beginSpriteSessions(m.sessions.configSyncPending, nil, nil)
 	return tea.Batch(cmd, m.spinner.Tick)
 }
 
@@ -363,7 +407,11 @@ func (m Model) sessionsView(width, height int) string {
 	case sessionsLoading:
 		return m.busyLine("Loading sessions…", width)
 	case sessionsConfirmingInstall:
-		return titleStyle.Render("Install Herdr?")
+		prompt := titleStyle.Render("Install Herdr?")
+		if m.herdrConfigSync != config.HerdrConfigSyncNever {
+			prompt += "\n\n" + mutedStyle.Render("Your local Herdr config will also be copied when present.")
+		}
+		return prompt
 	case sessionsInstallingHerdr:
 		return m.busyLine("Installing Herdr…", width)
 	case sessionsRefreshing, sessionsReady:

@@ -79,7 +79,7 @@ func TestTotalInitialFailureRetriesToReady(t *testing.T) {
 		}
 		return catalog.Inventory{Local: catalog.SourceResult{Rows: localRows()}, Sprites: catalog.SourceResult{Rows: spriteEndpointRows("devbox", sprites.Running)}}
 	}
-	model := New(context.Background(), ops)
+	model := New(context.Background(), ops, testConfigSync)
 	model, _ = update(t, model, run(t, model.initialCmd))
 	if model.home.phase != homeInitialLoadFailed || !strings.Contains(model.View().Content, "local down") || !strings.Contains(model.View().Content, "Sprites down") {
 		t.Fatalf("initial failure = phase %v view %q", model.active, model.View().Content)
