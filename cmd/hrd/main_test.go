@@ -55,20 +55,25 @@ func TestRunRejectsNestedHerdr(t *testing.T) {
 	}
 }
 
-func TestScreenOutputKeepsTerminalStateAcrossSplitWrites(t *testing.T) {
-	for name, target := range map[string]string{
-		"alternate screen": ansi.ResetModeAltScreenSaveCursor,
-		"window title":     ansi.SetWindowTitle(""),
+func TestScreenOutputFiltersOnlyAlternateScreenResetAcrossSplitWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sequence string
+		filtered bool
+	}{
+		{name: "alternate screen", sequence: ansi.ResetModeAltScreenSaveCursor, filtered: true},
+		{name: "window title", sequence: ansi.SetWindowTitle("agent · working")},
+		{name: "window title clear", sequence: ansi.SetWindowTitle("")},
 	} {
-		for split := 1; split < len(target); split++ {
-			t.Run(fmt.Sprintf("%s/split-%d", name, split), func(t *testing.T) {
+		for split := 1; split < len(tc.sequence); split++ {
+			t.Run(fmt.Sprintf("%s/split-%d", tc.name, split), func(t *testing.T) {
 				output, err := os.CreateTemp(t.TempDir(), "terminal")
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer func() { _ = output.Close() }()
 				screen := newScreenOutput(output)
-				for _, chunk := range []string{"before", target[:split], target[split:], "after"} {
+				for _, chunk := range []string{"before", tc.sequence[:split], tc.sequence[split:], "after"} {
 					if _, err := screen.Write([]byte(chunk)); err != nil {
 						t.Fatal(err)
 					}
@@ -83,7 +88,11 @@ func TestScreenOutputKeepsTerminalStateAcrossSplitWrites(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := "beforeafter" + ansi.ShowCursor + ansi.SetWindowTitle("") + ansi.ResetModeAltScreenSaveCursor
+				forwarded := tc.sequence
+				if tc.filtered {
+					forwarded = ""
+				}
+				want := "before" + forwarded + "after" + ansi.ShowCursor + ansi.ResetModeAltScreenSaveCursor
 				if string(got) != want {
 					t.Fatalf("output = %q, want %q", got, want)
 				}
@@ -125,13 +134,13 @@ func TestScreenOutputKeepsShellHiddenThroughAttachAndDetach(t *testing.T) {
 	if count := strings.Count(string(got), ansi.ResetModeAltScreenSaveCursor); count != 1 {
 		t.Fatalf("alternate-screen resets = %d, want only final restore: %q", count, got)
 	}
-	if count := strings.Count(string(got), ansi.SetWindowTitle("")); count != 1 {
-		t.Fatalf("window-title resets = %d, want only final restore: %q", count, got)
+	if count := strings.Count(string(got), ansi.SetWindowTitle("")); count != 2 {
+		t.Fatalf("forwarded window-title resets = %d, want 2: %q", count, got)
 	}
 	if !strings.Contains(string(got), title) {
-		t.Fatalf("terminal trace lost hrd title: %q", got)
+		t.Fatalf("terminal trace lost forwarded title: %q", got)
 	}
-	if !strings.HasSuffix(string(got), ansi.ShowCursor+ansi.SetWindowTitle("")+ansi.ResetModeAltScreenSaveCursor) {
+	if !strings.HasSuffix(string(got), ansi.ShowCursor+ansi.ResetModeAltScreenSaveCursor) {
 		t.Fatalf("terminal trace lacks final restore: %q", got)
 	}
 	for _, want := range []string{"picker", "remote", "picker-restored"} {
