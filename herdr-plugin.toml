@@ -2,7 +2,7 @@ id = "hrd"
 name = "hrd"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
-description = "Manage local and remote Herdr sessions from one terminal picker"
+description = "Manage your herd of sandboxes and the Herdr sessions running on them"
 platforms = ["linux", "macos"]
 
 [[build]]
