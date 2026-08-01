@@ -28,6 +28,12 @@ curl -fsSL https://raw.githubusercontent.com/joshuadavidthomas/hrd/main/install.
 
 The script checks the archive checksum. If an authenticated [`gh`](https://cli.github.com/) command is available, it also verifies the archive's build provenance. Set `HRD_REQUIRE_ATTESTATION=1` to stop when provenance verification is unavailable.
 
+### With Herdr
+
+```sh
+herdr plugin install joshuadavidthomas/hrd
+```
+
 ### With Homebrew
 
 ```sh
